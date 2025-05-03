@@ -11,8 +11,6 @@ from pyo import (
     pa_list_devices, Follower2
 )
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(module)s - %(message)s')
-
 # --- Core Parameters ---
 CALIBRATION_DURATION_S = 3
 ONSET_CUTOFF_TIME_S = 5.0       # Max age of onset times for rhythm analysis
@@ -51,6 +49,11 @@ PAD_BASE_DETUNE = 0.4                  # Base detune for SuperSaw
 PAD_LFO_MOD_DEPTH = 0.1                # Amount LFO affects detune
 REVERB_MIX = 0.25                       # Wet/dry mix for reverb (0-1)
 DELAY_MIX = 0.7                        # Wet/dry mix for delay (0-1)
+
+
+CHECK_INTERVAL_S = 0.075 # How often to check harmonic context (tune this)
+ONSET_SILENCE_THRESHOLD_S = 5.0 # Time without onsets to trigger reset attempt
+
 
 # Krumhansl Profiles (Normalized)
 KRUMHANSL_MAJOR_PROFILE = np.array([
@@ -285,7 +288,40 @@ class KrumhanslKeyDetector:
         self.total_analysis_time = 0
         self.max_history = 500
         self.confidence_history = deque(maxlen=self.max_history)
-        logging.info("KrumhanslKeyDetector initialized.")
+        self.logger = logging.getLogger('figaro')
+
+    def _validate_notes(self, notes):
+        """Validate notes list. Filters invalid notes and returns only valid ones."""
+        if not isinstance(notes, list):
+            raise ValueError("Input 'notes' must be a list.")
+        if not notes: return []
+        
+        valid_notes = []
+        for note in notes:
+            try:
+                # Handle numpy types
+                if hasattr(note, 'item'):  # numpy scalar
+                    note = note.item()
+                
+                # Convert to float first for validation
+                try:
+                    note_val = float(note)
+                except (ValueError, TypeError):
+                    continue
+                
+                # Check if it's an integer value
+                if not note_val.is_integer():
+                    continue
+                
+                # Convert to int and validate range
+                note_int = int(note_val)
+                if 0 <= note_int <= 127:
+                    valid_notes.append(note_int)
+                    
+            except Exception:
+                continue
+                
+        return valid_notes
 
     def analyze(self, notes):
         """Analyzes MIDI notes list for key. Returns {key, mode, confidence} or None."""
@@ -323,28 +359,6 @@ class KrumhanslKeyDetector:
         except Exception as e:
             logging.error(f"KrumhanslKeyDetector: Unexpected error in analysis: {e}", exc_info=True)
             return None
-
-    def _validate_notes(self, notes):
-        """Validate notes list. Filters invalid notes and logs warnings."""
-        if not isinstance(notes, list):
-            # Still raise ValueError here, as incorrect type is a fundamental usage error.
-            raise ValueError("Input 'notes' must be a list.")
-        if not notes: return [] 
-        
-        valid_notes = []
-        for i, note in enumerate(notes):
-            try:
-                if note is None: raise ValueError("is None")
-                # Attempt conversion cautiously
-                note_val = float(str(note).strip())
-                if not note_val.is_integer(): raise ValueError("is not an integer")
-                note_int = int(note_val)
-                if not (0 <= note_int <= 127): raise ValueError("out of range [0-127]")
-                valid_notes.append(note_int)
-            except (ValueError, TypeError, AttributeError) as e:
-                # Log warning instead of raising for individual bad notes
-                logging.warning(f"Invalid MIDI note at index {i} ('{note}') skipped: {e}")
-        return valid_notes
 
     def _calculate_correlation(self, hist1, hist2):
         """Calculate Pearson correlation (0-1 range). Handles NaNs/Infs/const."""
@@ -684,14 +698,17 @@ class AnalysisEngine:
         # ----------------------------------------
 
         # --- Update Harmonic Context State --- 
-        if self.harmonic_context != new_context:
-             if new_context is not None:
-                 logging.info(f"Harmonic Context Update: {new_context} (Prev: {self.harmonic_context})")
-             else:
-                 # Log only if context was previously set (i.e., changed to None)
-                 if self.harmonic_context is not None:
-                      logging.info(f"Harmonic Context Cleared (Prev: {self.harmonic_context})")
+        # Only update if the new context is valid (not None) and different
+        if new_context is not None and self.harmonic_context != new_context:
+             logging.info(f"Harmonic Context Update: {new_context} (Prev: {self.harmonic_context})")
              self.harmonic_context = new_context
+        # --- Consider if context should be cleared if new_context IS None --- 
+        # Optional: Add logic here to explicitly clear context after a period of invalid onsets?
+        # For now, invalid onsets simply don't change the existing context.
+        # elif new_context is None and self.harmonic_context is not None:
+        #    # Maybe clear context if multiple consecutive onsets are invalid?
+        #    # Current logic: Keep the old context.
+        #    logging.debug(f"Invalid onset, keeping existing context: {self.harmonic_context}")
         # -----------------------------------
 
     # --- REMOVED: _run_analysis method ---
@@ -729,31 +746,48 @@ class GenerativeEngine:
         logging.info("GenerativeEngine initialized.")
 
     def _get_chord_midi_notes(self, chord_name):
-        """Parses chord name (e.g., 'G#_min') and returns MIDI notes for a default octave."""
+        """Parses chord name (e.g., 'G#_min') and returns MIDI notes for a default octave.
+        Strictly expects 'Root_maj' or 'Root_min' format.
+        """
         if not chord_name or '_' not in chord_name:
+            logging.warning(f"GenerativeEngine: Invalid chord format '{chord_name}'. Missing underscore.")
             return None
             
         if chord_name in self.chord_notes_cache:
             return self.chord_notes_cache[chord_name]
 
         try:
-            root_str, quality = chord_name.split('_')
+            root_str, quality = chord_name.split('_', 1) # Split only once
+
+            # Validate Root
+            if root_str not in PITCH_CLASSES:
+                logging.warning(f"GenerativeEngine: Invalid root note '{root_str}' in chord '{chord_name}'.")
+                return None
+
+            # Validate Quality (Strictly 'maj' or 'min')
+            if quality not in ['maj', 'min']:
+                 logging.warning(f"GenerativeEngine: Invalid or unknown quality '{quality}' in chord '{chord_name}'. Must be 'maj' or 'min'.")
+                 return None
+
             root_pc = PITCH_CLASSES.index(root_str)
             # Calculate root MIDI note in the target octave
             root_midi = self.TARGET_OCTAVE * 12 + root_pc
 
             if quality == 'maj':
                 intervals = [0, 4, 7]
-            elif quality == 'min':
+            # elif quality == 'min': # This is the only other possibility now
+            else: 
                 intervals = [0, 3, 7]
-            else:
-                logging.warning(f"GenerativeEngine: Unknown chord quality '{quality}'. Defaulting to major.")
-                intervals = [0, 4, 7] # Default to major if quality is unknown
+            # --- Removed default to major logic ---
+            # else:
+            #     logging.warning(f"GenerativeEngine: Unknown chord quality '{quality}'. Defaulting to major.")
+            #     intervals = [0, 4, 7] # Default to major if quality is unknown
+            # ---------------------------------------
                 
             chord_midi_notes = [root_midi + interval for interval in intervals]
             self.chord_notes_cache[chord_name] = chord_midi_notes
             return chord_midi_notes
-        except (ValueError, IndexError) as e:
+        except (ValueError, IndexError) as e: # ValueError could happen if split fails unexpectedly, although unlikely now
              logging.error(f"GenerativeEngine: Error parsing chord name '{chord_name}': {e}")
              return None
 
@@ -825,9 +859,7 @@ class MasterScheduler:
     Checks the harmonic context periodically and triggers sustained sounds 
     based on stable analysis results.
     """
-    CHECK_INTERVAL_S = 0.075 # How often to check harmonic context (tune this)
-    ONSET_SILENCE_THRESHOLD_S = 5.0 # Time without onsets to trigger reset attempt
-
+    
     def __init__(self, figaro_instance, analysis_engine, sound_engine, generative_engine):
         # Store the main Figaro instance to access shared state/objects
         self.figaro = figaro_instance 
@@ -838,10 +870,8 @@ class MasterScheduler:
         self._last_context_change_time = time.time() # Timestamp of last context change
 
         # Pattern to periodically check context and trigger sounds
-        self.check_pattern = Pattern(self._check_context_and_trigger, time=self.CHECK_INTERVAL_S)
+        self.check_pattern = Pattern(self._check_context_and_trigger, time=CHECK_INTERVAL_S)
         self.check_pattern.play()
-
-        logging.info(f"MasterScheduler initialized (Context Check Interval: {self.CHECK_INTERVAL_S}s).")
 
     def _check_context_and_trigger(self):
         """Periodically checks harmonic context and triggers sounds if it changes."""
@@ -915,7 +945,7 @@ class MasterScheduler:
         # --- Experimental Onset Detector Reset --- 
         current_time = time.time()
         time_since_last_onset = current_time - self.figaro.last_raw_onset_time
-        if time_since_last_onset > self.ONSET_SILENCE_THRESHOLD_S:
+        if time_since_last_onset > ONSET_SILENCE_THRESHOLD_S:
             logging.warning(f"Scheduler: No onsets detected for {time_since_last_onset:.2f}s. Attempting threshold reset.")
             try:
                 original_threshold = self.figaro.input_processor.onset_detector.threshold
@@ -946,22 +976,27 @@ class MasterScheduler:
 class Figaro:
     """Main class integrating audio input, analysis, harmony, rhythm, and synthesis."""
 
-    def __init__(self, input_device=None, output_device=None, buffer_size=256, calibration_duration=CALIBRATION_DURATION_S):
-        self.server = Server(audio='portaudio', buffersize=buffer_size)
-        # Explicitly set devices if provided
-        if input_device is not None:
-            try: self.server.setInputDevice(input_device)
-            except Exception as e: logging.error(f"Failed to set input device {input_device}: {e}")
-        if output_device is not None:
-             try: self.server.setOutputDevice(output_device)
-             except Exception as e: logging.error(f"Failed to set output device {output_device}: {e}")
-             
-        self.server.setMidiInputDevice(99) # Avoid MIDI conflicts
-        self.server.boot()
+    def __init__(self, server=None, input_device=None, output_device=None, buffer_size=256, calibration_duration=CALIBRATION_DURATION_S):
+        if server is not None and server.getIsBooted():
+            logging.info("Figaro using provided Pyo server instance.")
+            self.server = server
+        else:
+            logging.info("Figaro creating new Pyo server instance (portaudio).")
+            self.server = Server(audio='portaudio', buffersize=buffer_size)
+            # Explicitly set devices if provided
+            if input_device is not None:
+                try: self.server.setInputDevice(input_device)
+                except Exception as e: logging.error(f"Failed to set input device {input_device}: {e}")
+            if output_device is not None:
+                 try: self.server.setOutputDevice(output_device)
+                 except Exception as e: logging.error(f"Failed to set output device {output_device}: {e}")
+                 
+            self.server.setMidiInputDevice(99) # Avoid MIDI conflicts
+            self.server.boot()
         
         # --- Get server sampling rate --- 
         self.fs = self.server.getSamplingRate()
-        logging.info(f"Server started with sampling rate: {self.fs} Hz")
+        logging.info(f"Server sampling rate: {self.fs} Hz")
         # --------------------------------
         
         self.calibrated_threshold = DEFAULT_THRESHOLD
