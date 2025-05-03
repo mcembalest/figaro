@@ -20,6 +20,7 @@ ONSET_DEBOUNCE_S = 0.05         # Min time between detected onsets
 AMP_SMOOTH_TIME_S = 0.02       # Smoothing time for amplitude follower before threshold
 NOTE_HISTORY_DURATION_S = 10.0  # Max age of notes for key analysis
 BEAT_CHECK_INTERVAL_S = 0.05
+CONTEXT_STUCK_TIMEOUT_S = 10.0  # Time after which to reset stuck context
 
 # --- MIDI/Pitch Related ---
 MIDI_REF_FREQ = 440.0
@@ -656,6 +657,9 @@ class AnalysisEngine:
         current_time = time.time() # Use the actual time of processing
         current_pitch_hz = self.input_processor.get_pitch()
         current_amp = self.input_processor.get_amplitude()
+        # --- NEW DEBUG LOG --- 
+        logging.debug(f"AnalysisEngine.process_onset - Raw Input: pitch={current_pitch_hz:.2f} Hz, amp={current_amp:.4f}")
+        # -------------------
         # Get the threshold used by the onset detector for comparison
         # Add a small safety margin, maybe? Or use it directly. Let's use it directly for now.
         amp_threshold = self.input_processor.onset_detector.threshold
@@ -822,12 +826,16 @@ class MasterScheduler:
     based on stable analysis results.
     """
     CHECK_INTERVAL_S = 0.075 # How often to check harmonic context (tune this)
+    ONSET_SILENCE_THRESHOLD_S = 5.0 # Time without onsets to trigger reset attempt
 
-    def __init__(self, analysis_engine, sound_engine, generative_engine):
+    def __init__(self, figaro_instance, analysis_engine, sound_engine, generative_engine):
+        # Store the main Figaro instance to access shared state/objects
+        self.figaro = figaro_instance 
         self.analysis_engine = analysis_engine
         self.sound_engine = sound_engine
         self.generative_engine = generative_engine 
         self._last_played_context = None # Track the last context we triggered sound for
+        self._last_context_change_time = time.time() # Timestamp of last context change
 
         # Pattern to periodically check context and trigger sounds
         self.check_pattern = Pattern(self._check_context_and_trigger, time=self.CHECK_INTERVAL_S)
@@ -837,13 +845,34 @@ class MasterScheduler:
 
     def _check_context_and_trigger(self):
         """Periodically checks harmonic context and triggers sounds if it changes."""
-        logging.debug("Scheduler tick")
+        # --- Log current smoothed amplitude --- 
+        current_smoothed_amp_val = None
+        current_smoothed_amp_type = None
+        try:
+            current_smoothed_amp = self.figaro.input_processor.smoothed_amp
+            # Check if the object itself is valid before calling get()
+            if current_smoothed_amp is not None:
+                current_smoothed_amp_val = current_smoothed_amp.get()
+                current_smoothed_amp_type = type(current_smoothed_amp_val)
+            else:
+                logging.warning("Scheduler tick: smoothed_amp object is None")
+                
+            logging.debug(f"Scheduler tick: Smoothed Amp Raw Value = {current_smoothed_amp_val}, Type = {current_smoothed_amp_type}")
+            # Only log formatted value if it seems valid (e.g., a number)
+            if isinstance(current_smoothed_amp_val, (int, float)):
+                 logging.debug(f"Scheduler tick: Smoothed Amp Formatted = {current_smoothed_amp_val:.5f}")
+            
+        except Exception as e:
+             logging.error(f"Scheduler tick: Error getting/logging smoothed_amp: {e}", exc_info=True)
+        # --------------------------------------
+        
         current_context = self.analysis_engine.get_harmonic_context()
         notes_to_play = None
 
         # --- Context Change Detection ---
         if current_context != self._last_played_context:
             logging.debug(f"Scheduler: Context changed from '{self._last_played_context}' to '{current_context}'")
+            self._last_context_change_time = time.time() # Update timestamp on change
 
             if current_context is not None:
                 # --- Determine MIDI notes based on context ---
@@ -874,7 +903,38 @@ class MasterScheduler:
             # --- Update last played context ---
             self._last_played_context = current_context
             
-        # else: context hasn't changed, let the current sound sustain/decay
+        # --- Stuck Context Timeout Check ---
+        elif current_context is not None and time.time() - self._last_context_change_time > CONTEXT_STUCK_TIMEOUT_S:
+             logging.warning(f"Scheduler: Context '{current_context}' seems stuck for >{CONTEXT_STUCK_TIMEOUT_S}s. Resetting.")
+             # Forcibly clear the context in AnalysisEngine and the scheduler's state
+             self.analysis_engine.harmonic_context = None # Directly modify if AnalysisEngine allows or add a method
+             self._last_played_context = None
+             self._last_context_change_time = time.time() # Reset timer
+         # -----------------------------------
+             
+        # --- Experimental Onset Detector Reset --- 
+        current_time = time.time()
+        time_since_last_onset = current_time - self.figaro.last_raw_onset_time
+        if time_since_last_onset > self.ONSET_SILENCE_THRESHOLD_S:
+            logging.warning(f"Scheduler: No onsets detected for {time_since_last_onset:.2f}s. Attempting threshold reset.")
+            try:
+                original_threshold = self.figaro.input_processor.onset_detector.threshold
+                # Briefly lower threshold (e.g., to half, but not below a minimum like 0.005)
+                # --- Make dip slightly more aggressive --- 
+                temp_threshold = max(original_threshold * 0.3, 0.003) # Lower multiplier and minimum
+                # ------------------------------------------
+                self.figaro.input_processor.set_threshold(temp_threshold) 
+                # Maybe a tiny delay is needed? Pyo timing can be tricky.
+                # time.sleep(0.01) # Let's try without sleep first
+                self.figaro.input_processor.set_threshold(original_threshold) # Restore original
+                # Reset the timer so we don't keep trying immediately
+                self.figaro.last_raw_onset_time = current_time 
+                logging.info("Scheduler: Onset detector threshold reset attempted.")
+            except Exception as e:
+                logging.error(f"Scheduler: Error during threshold reset: {e}")
+        # -----------------------------------------
+        
+        # else: context hasn't changed and timeout not reached, let the current sound sustain/decay
 
     def stop(self):
         """Stop the scheduler's checking Pattern."""
@@ -913,11 +973,12 @@ class Figaro:
         self.analysis_engine = AnalysisEngine(input_processor=self.input_processor, fs=self.fs)
         self.generative_engine = GenerativeEngine()
         # --- Instantiate MasterScheduler (no changes needed here) --- 
-        self.master_scheduler = MasterScheduler(analysis_engine=self.analysis_engine, 
+        self.master_scheduler = MasterScheduler(figaro_instance=self, analysis_engine=self.analysis_engine, 
                                               sound_engine=self.sound_engine,
                                               generative_engine=self.generative_engine)
         # ------------------------------------------------
         self.last_true_onset_time = 0
+        self.last_raw_onset_time = 0 # Add tracker for *any* onset callback
         logging.info("Figaro initialized.") # Simplified log
 
     def calibrate(self):
@@ -956,6 +1017,11 @@ class Figaro:
 
     def on_onset_detected(self, trigger_time):
         """Callback triggered by AudioInputProcessor. Feeds AnalysisEngine."""
+        # --- NEW DEBUG LOG --- 
+        logging.debug(f"Raw onset callback triggered at {trigger_time:.4f}")
+        self.last_raw_onset_time = trigger_time # Store time of raw onset
+        # -------------------
+        
         # Debounce
         if trigger_time - self.last_true_onset_time < ONSET_DEBOUNCE_S:
              # logging.debug(f"Debounced onset at {trigger_time:.4f}") # Keep debug if needed
