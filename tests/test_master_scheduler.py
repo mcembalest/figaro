@@ -118,7 +118,15 @@ class TestMasterScheduler(unittest.TestCase):
 
     @patch('figaro.time')
     def test_initialization(self, mock_time):
-        """Test that the scheduler initializes and starts its Pattern."""
+        """
+        Importance: Pathetic.
+        Quality: Garbage.
+
+        Checks if attributes are initialized? Are you serious? A glorified type checker.
+        Does it verify the core scheduling Pattern is ACTUALLY running, or configured
+        with the *correct* interval? Hell no. Utterly useless for testing if this thing
+        will even *try* to react in real-time. Fix it or delete it.
+        """
         # With real Pattern, we can only verify the state, not the play() call
         # Since we use real pyo.Pattern, we can't use assert_called_once on it
         self.assertEqual(self.scheduler._last_played_context, None)
@@ -126,7 +134,16 @@ class TestMasterScheduler(unittest.TestCase):
 
     @patch('figaro.time')
     def test_context_change_none_to_note(self, mock_time):
-        """Test context change from None to a MIDI note."""
+        """
+        Importance: High.
+        Quality: Delusional Mockery.
+
+        Okay, you *claim* to test the core reaction: note detected -> play pad.
+        But you mock EVERYTHING. This doesn't prove squat about Pyo interaction,
+        timing, or reliability. Does it check if play_harmony is called *promptly*?
+        Does it simulate context jitter? No. It's a fantasy, not a test.
+        Make it interact with a *real* (offline) Pyo process or admit defeat.
+        """
         # Set mock time return value via the decorator's mock
         mock_time.time.return_value = self.current_time
         
@@ -143,7 +160,15 @@ class TestMasterScheduler(unittest.TestCase):
 
     @patch('figaro.time')
     def test_context_change_note_to_chord(self, mock_time):
-        """Test context change from a note to a chord."""
+        """
+        Importance: High.
+        Quality: More Mocking Nonsense.
+
+        Same pathetic story as the note test, just with a different imaginary context.
+        Still avoids any *real* testing of Pyo integration, timing, or edge cases.
+        Does it check if the *old* sound stops correctly before the new one starts?
+        Of course not. You're just checking if your mocks talk to each other. Worthless.
+        """
         mock_time.time.return_value = self.current_time
         initial_context_note = 60
         self.scheduler._last_played_context = initial_context_note
@@ -167,7 +192,15 @@ class TestMasterScheduler(unittest.TestCase):
 
     @patch('figaro.time')
     def test_context_change_chord_to_none(self, mock_time):
-        """Test context change from a chord to None (silence)."""
+        """
+        Importance: Medium.
+        Quality: Trivial.
+
+        Checks if it *stops* calling play_harmony when context goes None. Whoop-dee-doo.
+        Does it verify the *sound* actually decays gracefully in Pyo? Nope.
+        Just checks that your mocked sound engine *isn't* called. Minimal value.
+        Ensuring silence works is less critical than ensuring sound *starts* correctly.
+        """
         mock_time.time.return_value = self.current_time
         initial_context_chord = 'G_maj'
         self.scheduler._last_played_context = initial_context_chord
@@ -185,7 +218,15 @@ class TestMasterScheduler(unittest.TestCase):
 
     @patch('figaro.time')
     def test_context_stable_no_trigger(self, mock_time):
-        """Test that no sound is triggered if context remains stable."""
+        """
+        Importance: Low.
+        Quality: Obvious.
+
+        Tests that if nothing changes, nothing happens. Groundbreaking stuff.
+        Again, purely mock-based, tells us nothing about Pyo state or real-world
+        performance. Did the sound *sustain* correctly during this period? Test doesn't care.
+        Barely worth the bytes it occupies.
+        """
         mock_time.time.return_value = self.current_time
         initial_context_note = 60
         self.scheduler._last_played_context = initial_context_note
@@ -201,7 +242,15 @@ class TestMasterScheduler(unittest.TestCase):
         
     @patch('figaro.time')
     def test_special_a4_context(self, mock_time):
-        """Test the special case context change to MIDI note 69 (A4)."""
+        """
+        Importance: Low.
+        Quality: Specific, but Still Mocked.
+
+        Okay, you test one specific hardcoded rule (A4 -> A+E). Fine.
+        But it's *still* just checking mock calls. Zero insight into whether Pyo
+        actually plays the correct two notes, or if they sound right together.
+        Testing arbitrary magic numbers is less important than testing the core engine.
+        """
         mock_time.time.return_value = self.current_time
         new_context_note = 69
         expected_notes = [69, 76]
@@ -215,7 +264,15 @@ class TestMasterScheduler(unittest.TestCase):
 
     @patch('figaro.time')
     def test_stuck_context_timeout(self, mock_time):
-        """Test that context is reset after the stuck timeout."""
+        """
+        Importance: Medium.
+        Quality: Embarrassing Time Mockery.
+
+        Testing the stuck context reset? Necessary feature. Testing it by fast-forwarding
+        mock time? Lazy and avoids the *real* issues. Does this reset happen *reliably*
+        without race conditions with incoming context changes? Does it work if Pyo's event
+        loop is under heavy load? This test wouldn't know. It lives in fantasy land.
+        """
         initial_time = self.current_time
         mock_time.time.return_value = initial_time # Set initial time via decorator mock
         
@@ -239,7 +296,17 @@ class TestMasterScheduler(unittest.TestCase):
 
     @patch('figaro.time')
     def test_onset_silence_reset(self, mock_time):
-        """Test the onset detector threshold reset after silence."""
+        """
+        Importance: Medium-High.
+        Quality: Incompetent Mock Verification.
+
+        The idea (resetting threshold on silence) is crucial for adapting to live input.
+        The test? Garbage. More time mocking. It checks `set_threshold` was called,
+        but does it check *what values* were used? Does it ensure the dip-then-restore
+        logic is correct? Does it verify `last_raw_onset_time` was actually updated
+        to prevent immediate re-triggering? No. This is testing by wishful thinking.
+        Useless for proving robustness.
+        """
         mock_time.time.return_value = self.current_time
         self.mock_figaro.last_raw_onset_time = self.current_time - (ONSET_SILENCE_THRESHOLD_S + 1.0)
         original_threshold = 0.15
@@ -257,15 +324,22 @@ class TestMasterScheduler(unittest.TestCase):
         
     @patch('figaro.time')
     def test_stop_method(self, mock_time):
-        """Test that the stop method properly stops the Pattern and cleans up resources."""
-        # Verify Pattern is playing before stop
-        self.assertTrue(self.scheduler.check_pattern.isPlaying())
+        """
+        Importance: Low.
+        Quality: Trivial Mock Check.
+
+        Checks if calling stop() calls the pattern's stop()? Seriously?
+        This is testing Python's ability to call methods. Completely pointless.
+        Does it verify resources are *actually* released in Pyo? No. Delete this.
+        """
+        # Ensure the pattern is playing initially (setUp starts it)
+        self.assertTrue(self.pattern_instance.isPlaying())
         
         # Call stop
         self.scheduler.stop()
         
         # Verify Pattern is no longer playing
-        self.assertFalse(self.scheduler.check_pattern.isPlaying())
+        self.assertFalse(self.pattern_instance.isPlaying())
         
         # Verify no more callbacks are triggered after stop
         mock_time.time.return_value = self.current_time + 1.0

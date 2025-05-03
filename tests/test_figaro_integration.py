@@ -157,7 +157,14 @@ class TestFigaroIntegration(unittest.TestCase):
     @patch('figaro.MasterScheduler')
     def test_component_initialization_with_server(self, MockMasterScheduler, MockGenerativeEngine, MockAnalysisEngine, MockSoundEngine, MockAudioInputProcessor, MockServer):
         """
-        Basic Test: Ensure all main Figaro components initialize correctly.
+        Importance: Laughable.
+        Quality: Mock Hell.
+
+        You call this integration? You've mocked EVERY SINGLE CLASS! This tests *nothing*
+        about how these components actually interact using Pyo signals or timing.
+        It just checks if your __init__ calls other __init__s with mock objects.
+        This is the definition of useless. Provides ZERO confidence the actual application works.
+        DELETE THIS TEST. It is actively harmful by creating a false sense of security.
         """
         mock_server_instance = MockServer.return_value
         mock_server_instance.getSamplingRate.return_value = 44100
@@ -206,7 +213,14 @@ class TestFigaroIntegration(unittest.TestCase):
     @patch('figaro.MasterScheduler') # Mock MasterScheduler itself
     def test_figaro_instantiates_scheduler(self, MockMasterScheduler, MockGenerativeEngine, MockAnalysisEngine, MockSoundEngine, MockAudioInputProcessor, MockServer):
         """
-        Test: Verify Figaro instantiates MasterScheduler correctly.
+        Importance: Laughable.
+        Quality: More Mock Hell.
+
+        Another monumentally pointless test. It checks if Figaro's __init__ calls
+        MasterScheduler's __init__? Are you testing if Python can execute code sequentially?
+        This tells us NOTHING about whether the scheduler actually *schedules* anything
+        or interacts correctly with Pyo's timing. ZERO INTEGRATION VALUE.
+        Delete this garbage too.
         """
         mock_server_instance = MockServer.return_value
         mock_server_instance.getSamplingRate.return_value = 44100
@@ -238,7 +252,16 @@ class TestFigaroIntegration(unittest.TestCase):
     @patch('figaro.Pattern') # <<< ADD THIS MOCK
     def test_onset_detection_triggers_analysis(self, MockPattern, MockGenerativeEngine, MockAnalysisEngine, MockAudioInputProcessor, mock_sound_engine, mock_time, MockServer):
         """
-        Test: Verify Figaro.on_onset_detected calls AnalysisEngine.process_onset correctly after debouncing.
+        Importance: High (Conceptually).
+        Quality: Utterly Neutered by Mocks.
+
+        Okay, the *idea* is important: onset -> analysis. But you mock EVERYTHING AGAIN!
+        You manually call `on_onset_detected`? You mock `AnalysisEngine`?
+        This test proves *nothing* about whether a real Pyo `Thresh` object triggering
+        `on_onset_detected` actually causes the *real* `AnalysisEngine` to process
+        the *real*, potentially noisy, pitch/amplitude data from Pyo at the right time.
+        This mock-fest completely sidesteps all the real-time challenges.
+        Needs a complete rewrite to use *real* (offline) Pyo objects.
         """
         mock_server_instance = MockServer.return_value
         mock_server_instance.getSamplingRate.return_value = 44100
@@ -288,7 +311,20 @@ class TestFigaroIntegration(unittest.TestCase):
     @patch('figaro.GenerativeEngine')
     def test_scheduler_triggers_sound_on_context_change(self, MockGenerativeEngine, MockAnalysisEngine, MockSoundEngine, MockAudioInputProcessor, mock_time, MockPattern, MockServer):
         """
-        Test: Verify MasterScheduler calls SoundEngine.play_harmony on context change.
+        Importance: Critical.
+        Quality: Completely Faked "Integration".
+
+        This is supposed to be the CORE loop: analysis context -> scheduler -> sound.
+        And what do you do? Mock the Scheduler's Pattern, mock time, mock the AnalysisEngine,
+        mock the SoundEngine! You manually set the AnalysisEngine's return value and then
+        manually call the Scheduler's *internal* check method? And assert the mocked SoundEngine
+        was called?
+        This isn't an integration test! This is a puppet show!
+        It proves absolutely NOTHING about whether the real system works with Pyo.
+        It ignores timing, signal flow, potential race conditions, everything.
+        This needs a complete rewrite using an offline Pyo server and *actual* Pyo signals,
+        feeding simulated input and checking the *actual* output signal or state changes.
+        This current version is worse than useless.
         """
         mock_server_instance = MockServer.return_value
         mock_server_instance.getSamplingRate.return_value = 44100

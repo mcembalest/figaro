@@ -18,7 +18,15 @@ class TestGenerativeEngine(unittest.TestCase):
     # --- Tests for _get_chord_midi_notes --- 
 
     def test_get_chord_midi_notes_valid(self):
-        """Test retrieving MIDI notes for valid major and minor chords."""
+        """
+        Importance: Low.
+        Quality: Trivial.
+
+        Checks if your little helper function can count intervals. Congratulations.
+        Does this verify that Pyo will actually play these notes correctly, or that
+        they form a musically sensible chord in the target octave? Absolutely not.
+        It's basic arithmetic checking, nothing to do with audio.
+        """
         # C Major (Root PC = 0)
         expected_c_maj = [48, 52, 55] # C4, E4, G4 (TARGET_OCTAVE=4)
         self.assertEqual(self.engine._get_chord_midi_notes('C_maj'), expected_c_maj)
@@ -32,14 +40,28 @@ class TestGenerativeEngine(unittest.TestCase):
         self.assertEqual(self.engine._get_chord_midi_notes('B_min'), expected_b_min)
 
     def test_get_chord_midi_notes_invalid_format(self):
-        """Test invalid chord name formats."""
+        """
+        Importance: Microscopic.
+        Quality: Pedantic.
+
+        Tests if your parser correctly rejects garbage input. Okay, fine.
+        This prevents maybe one category of dumb errors, but does zero for testing
+        the actual *sound* generation or its musicality. Barely registers as a test.
+        """
         invalid_names = [None, '', 'Cmaj', 'C_', '_maj', 'C_major', 'X_maj']
         for name in invalid_names:
             with self.subTest(name=name):
                 self.assertIsNone(self.engine._get_chord_midi_notes(name), f"Failed for: {name}")
 
     def test_get_chord_midi_notes_unknown_quality(self):
-        """Test chord names with unknown quality (should return None due to strict parsing)."""
+        """
+        Importance: Microscopic.
+        Quality: Also Pedantic.
+
+        More garbage input checking. At least it's consistent with the *actual* code
+        now (rejecting unknown qualities). Still, utterly unrelated to audio output.
+        Who cares if it rejects 'C_dim' if it can't even prove 'C_maj' sounds right?
+        """
         # Expect None now due to stricter parsing in _get_chord_midi_notes
         self.assertIsNone(self.engine._get_chord_midi_notes('C_dim'))
         self.assertIsNone(self.engine._get_chord_midi_notes('C_unknown'))
@@ -52,7 +74,14 @@ class TestGenerativeEngine(unittest.TestCase):
         # ---------------------
 
     def test_get_chord_midi_notes_caching(self):
-        """Test that chord note lookups are cached."""
+        """
+        Importance: Negligible.
+        Quality: Pointless.
+
+        Tests if a Python dictionary works as a cache. Wow. Are you testing Python itself?
+        This has *nothing* to do with Pyo, audio, real-time performance, or music.
+        This is the kind of test junior developers write to feel productive. Delete it.
+        """
         chord_name = 'D_min'
         expected_d_min = [50, 53, 57] # D4, F4, A4
         
@@ -72,12 +101,26 @@ class TestGenerativeEngine(unittest.TestCase):
     # --- Tests for generate_response --- 
 
     def test_generate_response_no_context(self):
-        """Test response generation when harmonic_context is None."""
+        """
+        Importance: Low.
+        Quality: Obvious.
+
+        Tests that if you give it nothing, it does nothing. Shocking.
+        Minimal value, just confirms the basic guard condition. Doesn't test audio.
+        """
         events = self.engine.generate_response(beat_phase=None, harmonic_context=None, bpm=None)
         self.assertEqual(events, [])
 
     def test_generate_response_single_note_context(self):
-        """Test response generation for a valid MIDI note context."""
+        """
+        Importance: Medium.
+        Quality: Superficial.
+
+        Okay, it checks if the *correct* frequency is *calculated* for the pluck synth
+        when a note is detected. Does it check if this frequency is actually sent to
+        the Pyo SoundEngine? Does it check if the 'pluck' synth sounds anything like
+        a pluck or just a distorted mess? Does it test timing? No. Just dictionary checking.
+        """
         midi_note = 65 # F4
         expected_freq = midi_to_hz(midi_note)
         events = self.engine.generate_response(beat_phase=0, harmonic_context=midi_note, bpm=120)
@@ -89,7 +132,16 @@ class TestGenerativeEngine(unittest.TestCase):
         self.assertAlmostEqual(event['freq'], expected_freq, places=5)
 
     def test_generate_response_single_note_invalid_midi(self):
-        """Test response generation when MIDI note context results in invalid frequency."""
+        """
+        Importance: Low.
+        Quality: Needlessly Complex Mocking.
+
+        You're testing edge cases around MIDI conversion? Fine, but the way you do it
+        by patching `midi_to_hz` is just more disconnected mocking.
+        It verifies your internal logic handles a None return, but doesn't prove anything
+        about how Pyo or the *real* `midi_to_hz` behaves with weird inputs.
+        Focus on testing the core functionality, not every conceivable numerical edge case.
+        """
         # midi_to_hz returns float or None. hz_to_midi returns int or None.
         # generate_response calls hz_to_midi internally first if context is numeric.
         # Test cases where hz_to_midi would fail inside the function are tricky.
@@ -119,7 +171,15 @@ class TestGenerativeEngine(unittest.TestCase):
 
     @patch('figaro.GenerativeEngine._get_chord_midi_notes')
     def test_generate_response_chord_context_valid(self, mock_get_notes):
-        """Test response generation for a valid chord name context."""
+        """
+        Importance: Medium.
+        Quality: More Superficial Mocking.
+
+        Same story as the single note test. Checks if the *root* frequency is calculated
+        correctly based on a mocked chord lookup. Doesn't verify the sound engine gets called,
+        doesn't verify the sound itself, doesn't test timing. Are you *trying* to avoid testing
+        the actual audio part?
+        """
         chord_name = 'A_min'
         # Correct root note for A minor with TARGET_OCTAVE=4 is A4 = MIDI 69
         root_note_midi = 69 
@@ -143,7 +203,14 @@ class TestGenerativeEngine(unittest.TestCase):
         self.assertAlmostEqual(event['freq'], expected_root_freq, places=5)
 
     def test_generate_response_chord_context_invalid(self):
-        """Test response generation for an invalid chord name context."""
+        """
+        Importance: Microscopic.
+        Quality: Repetitive Pedantry.
+
+        More testing of invalid inputs to the chord parser, indirectly through the main
+        response function. Adds almost zero value over the direct parser tests.
+        Still completely ignores the audio output.
+        """
         invalid_names = [None, '', 'Cmaj', 'C_', '_maj']
         for name in invalid_names:
             with self.subTest(name=name):
@@ -151,7 +218,15 @@ class TestGenerativeEngine(unittest.TestCase):
                 self.assertEqual(events, [], f"Failed for invalid name: {name}")
                 
     def test_generate_response_unknown_context_type(self):
-        """Test response generation for unknown harmonic_context types."""
+        """
+        Importance: Microscopic.
+        Quality: Defensive, but Pointless.
+
+        Checks if it handles random Python types as context without crashing. Okay.
+        Does this scenario *ever* happen in the real application? Probably not.
+        Focus your testing effort on realistic scenarios and actual audio behaviour,
+        not hypothetical type errors.
+        """
         unknown_contexts = [[60, 64, 67], {'key': 0}, 1+2j]
         for context in unknown_contexts:
             with self.subTest(context=context):

@@ -10,7 +10,15 @@ from figaro import hz_to_midi, midi_to_hz
 class TestFrequencyMidiConversion(unittest.TestCase):
 
     def test_hz_to_midi_valid(self):
-        """Test valid frequency to MIDI conversions."""
+        """
+        Importance: Microscopic.
+        Quality: Trivial Math Check.
+
+        Testing Hz to MIDI conversion? This is high school math.
+        Does it prove anything about your audio engine? No.
+        It checks logarithm and rounding. Groundbreaking.
+        Barely worth keeping.
+        """
         self.assertEqual(hz_to_midi(440.0), 69, "A4 (440 Hz) should be MIDI 69")
         self.assertEqual(hz_to_midi(261.63), 60, "C4 (approx 261.63 Hz) should be MIDI 60")
         self.assertEqual(hz_to_midi(4186.01), 108, "C8 (approx 4186.01 Hz) should be MIDI 108")
@@ -22,7 +30,14 @@ class TestFrequencyMidiConversion(unittest.TestCase):
         self.assertEqual(hz_to_midi(430), 69, "430 Hz should round to MIDI 69 (A4)") # A4 is 440, G#4 is 415.30. 430 is closer to A4.
 
     def test_hz_to_midi_invalid_input(self):
-        """Test invalid inputs for hz_to_midi."""
+        """
+        Importance: Negligible.
+        Quality: Defensive Fluff.
+
+        Checks if it handles garbage input (negative/zero frequency, wrong types).
+        Good defensive coding? Sure. Relevant to the core task of making music
+        with Pyo in real-time? Absolutely not. This is boilerplate validation.
+        """
         # Test zero frequency
         self.assertIsNone(hz_to_midi(0), "Zero frequency should return None")
         # Test negative frequency
@@ -37,7 +52,15 @@ class TestFrequencyMidiConversion(unittest.TestCase):
         #     self.assertTrue(any("Invalid frequency" in msg for msg in log.output))
 
     def test_midi_to_hz_valid(self):
-        """Test valid MIDI to frequency conversions."""
+        """
+        Importance: Microscopic.
+        Quality: More Trivial Math.
+
+        The inverse of the other test. Checks exponentiation.
+        Still completely basic math, unrelated to the challenges of real-time audio.
+        Ensures Pyo gets a floating point number, great.
+        Minimal value.
+        """
         self.assertAlmostEqual(midi_to_hz(69), 440.0, delta=0.01, msg="MIDI 69 should be approx 440.0 Hz")
         self.assertAlmostEqual(midi_to_hz(60), 261.63, delta=0.01, msg="MIDI 60 should be approx 261.63 Hz")
         self.assertAlmostEqual(midi_to_hz(108), 4186.01, delta=0.01, msg="MIDI 108 should be approx 4186.01 Hz")
@@ -52,7 +75,14 @@ class TestFrequencyMidiConversion(unittest.TestCase):
         self.assertIsInstance(midi_to_hz(69), float, "Return type should be float")
 
     def test_midi_to_hz_invalid_input(self):
-        """Test invalid inputs for midi_to_hz."""
+        """
+        Importance: Negligible.
+        Quality: More Defensive Fluff.
+
+        Checks the inverse conversion for garbage input types.
+        Same comment as before: basic validation, zero relevance to the actual
+        problem domain of interactive audio processing.
+        """
         # Test non-numeric types
         self.assertIsNone(midi_to_hz("abc"), "String input should return None")
         self.assertIsNone(midi_to_hz(None), "None input should return None")

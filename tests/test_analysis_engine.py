@@ -55,7 +55,17 @@ class TestAnalysisEngine(unittest.TestCase):
         self.analysis_engine.stop()
 
     def test_process_onset_valid_pitch_and_amp(self):
-        """Test onset processing with valid pitch and amplitude."""
+        """
+        Importance: Medium (Conceptually).
+        Quality: Fundamentally Flawed Mocking.
+
+        Tests the core idea: valid onset -> update context. BUT, it uses mocked
+        input that provides *static, perfect* pitch/amp values. Real Pyo Yin/Follower
+        data fluctuates! It doesn't test if the engine correctly handles slightly off-pitch
+        notes, or amplitude values that haven't quite settled when Thresh triggers.
+        Ignores the *timing* relationship between onset and feature extraction.
+        Useless for proving real-world robustness.
+        """
         test_time = time.time()
         test_pitch_hz = 440.0 # A4
         test_amp = 0.5
@@ -76,7 +86,14 @@ class TestAnalysisEngine(unittest.TestCase):
         self.mock_input_processor.get_amplitude.assert_called_once()
 
     def test_process_onset_pitch_too_low(self):
-        """Test onset processing when pitch is below MIN_YIN_FREQ_FOR_MONO."""
+        """Test onset processing when pitch is below MIN_YIN_FREQ_FOR_MONO.
+        Importance: Low.
+        Quality: Obvious Filter Check.
+
+        Checks if it ignores pitches below a hardcoded threshold. Fine.
+        Again, uses perfect mock data. Doesn't test edge cases around the threshold
+        or how this interacts with fluctuating pitch from Yin. Minimal value.
+        """
         # Need to access the class variable correctly
         min_yin_freq = AnalysisEngine.MIN_YIN_FREQ_FOR_MONO 
         test_time = time.time()
@@ -98,7 +115,15 @@ class TestAnalysisEngine(unittest.TestCase):
         self.assertEqual(self.analysis_engine.get_harmonic_context(), initial_context)
 
     def test_process_onset_amp_too_low(self):
-        """Test onset processing when amplitude is below threshold."""
+        """Test onset processing when amplitude is below threshold.
+        Importance: Low.
+        Quality: Obvious Filter Check.
+
+        Checks if it ignores onsets where the mocked amplitude is below the mocked threshold.
+        Important filter? Yes. Tested realistically? No. It assumes amplitude is static
+        and perfectly known at the onset moment. Real amplitude envelopes are dynamic.
+        Ignores the complexities of Pyo's Thresh and Follower interaction.
+        """
         test_time = time.time()
         test_pitch_hz = 440.0
         threshold = 0.1
@@ -120,7 +145,11 @@ class TestAnalysisEngine(unittest.TestCase):
 
     @patch('figaro.hz_to_midi') # Patch hz_to_midi in the figaro module
     def test_process_onset_midi_conversion_fails(self, mock_hz_to_midi):
-        """Test onset processing when hz_to_midi returns None."""
+        """Test onset processing when hz_to_midi returns None.
+        Importance: Low.
+        Quality: Mocking Internal Helpers.
+        Torvalds: "Tests what happens if 'hz_to_midi' (which is already tested in test_utils) returns None. You're patching your own utility function to test defensiveness? Pointless. Focus on testing the interaction with Pyo, not internal error handling for scenarios that the utility function tests already cover."
+        """
         test_time = time.time()
         test_pitch_hz = 440.0 # A valid pitch
         test_amp = 0.5
@@ -145,7 +174,11 @@ class TestAnalysisEngine(unittest.TestCase):
         mock_hz_to_midi.assert_called_once_with(test_pitch_hz)
 
     def test_process_onset_context_changes(self):
-        """Test a sequence of onsets causing context changes."""
+        """Test a sequence of onsets causing context changes.
+        Importance: Medium.
+        Quality: Scripted Mock Sequence.
+        Torvalds: "Runs a pre-scripted sequence of mock inputs (valid, invalid amp, valid, same valid, invalid pitch, valid different). Checks if the context state machine follows the script. Okay, this tests the intended logic in isolation. But it STILL uses perfect, static mock data for each step. It tells you NOTHING about how this logic behaves with noisy, fluctuating, slightly delayed Pyo signals in a real-time loop. The core problem remains."
+        """
         base_time = time.time()
         threshold = 0.1
         self.mock_input_processor.onset_detector.threshold = threshold
@@ -189,7 +222,11 @@ class TestAnalysisEngine(unittest.TestCase):
         self.assertEqual(self.analysis_engine.get_harmonic_context(), 67) # Should change to G4
 
     def test_stop_method(self):
-        """Test the stop method (currently does nothing but should exist)."""
+        """Test the stop method (currently does nothing but should exist).
+        Importance: Negligible.
+        Quality: Testing Nothing.
+        Torvalds: "Checks if calling a currently empty 'stop' method doesn't crash. Completely pointless. If 'stop' actually did something involving Pyo resources, that would need testing. As it is, this is testing a pass statement. Delete it."
+        """
         try:
             self.analysis_engine.stop()
         except Exception as e:
