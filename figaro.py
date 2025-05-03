@@ -2,14 +2,23 @@ import argparse
 import numpy as np
 import logging
 import time
+import os             # Added for directory creation
+import datetime       # Added for timestamped filenames
+import matplotlib
+matplotlib.use('Agg') # Use non-interactive backend BEFORE importing pyplot
+import matplotlib.pyplot as plt # Added for plotting
 from collections import deque
 from pyo import (
     Server, Input, Yin, Port, Thresh,
     SuperSaw, RCOsc, Adsr, TrigFunc,
     Mix, Freeverb, Delay, MoogLP, Clip, LFO, Spectrum,
     NewTable, TableRec, Pattern, FM, Noise,
-    pa_list_devices, Follower2
+    pa_list_devices, Follower2, Scope, # Added Scope for visualization
+    Record # Added Record for visualization
 )
+import soundfile as sf # Added for reading audio files
+import librosa          # Added for audio analysis (spectrogram)
+import librosa.display  # Added for displaying spectrogram
 
 # --- Core Parameters ---
 CALIBRATION_DURATION_S = 3
@@ -976,7 +985,7 @@ class MasterScheduler:
 class Figaro:
     """Main class integrating audio input, analysis, harmony, rhythm, and synthesis."""
 
-    def __init__(self, server=None, input_device=None, output_device=None, buffer_size=256, calibration_duration=CALIBRATION_DURATION_S):
+    def __init__(self, server=None, input_device=None, output_device=None, buffer_size=256, calibration_duration=CALIBRATION_DURATION_S, record=False, record_duration=5, record_dir='recordings'):
         if server is not None and server.getIsBooted():
             logging.info("Figaro using provided Pyo server instance.")
             self.server = server
@@ -1015,6 +1024,34 @@ class Figaro:
         self.last_true_onset_time = 0
         self.last_raw_onset_time = 0 # Add tracker for *any* onset callback
         logging.info("Figaro initialized.") # Simplified log
+
+        self.record = record
+        self.record_duration = record_duration
+        self.record_base_dir = record_dir
+        self.current_rec_session_dir = None
+        self.current_rec_audio_file = None
+
+        # --- Recording Setup ---
+        self.recorder = None
+        if self.record:
+            # Create base recording directory if it doesn't exist
+            if not os.path.exists(self.record_base_dir):
+                os.makedirs(self.record_base_dir)
+                logging.info(f"Created base recording directory: {self.record_base_dir}")
+
+            # Create timestamped session directory
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            self.current_rec_session_dir = os.path.join(self.record_base_dir, timestamp)
+            os.makedirs(self.current_rec_session_dir)
+            logging.info(f"Created recording session directory: {self.current_rec_session_dir}")
+
+            # Define final audio file path
+            self.current_rec_audio_file = os.path.join(self.current_rec_session_dir, "session_audio.wav")
+
+            # Setup Recorder to save directly to final location
+            self.recorder = Record(self.sound_engine.final_mix, filename=self.current_rec_audio_file, chnls=2, fileformat=0, sampletype=0)
+            logging.info(f"Recording setup complete. Output will be saved to: {self.current_rec_session_dir}")
+        # ---------------------------
 
     def calibrate(self):
         """Calibrate input threshold based on ambient noise."""
@@ -1068,52 +1105,125 @@ class Figaro:
         self.analysis_engine.process_onset(trigger_time)
         # ----------------------------------------------------------------------
 
-    def start(self):
-        """Start the audio server, calibrate, and run main loop."""
-        self.server.start()
-        self.calibrate()
-        print("Figaro started. Press Ctrl+C to stop.")
+    def _generate_session_plot(self, n_mels=128):
+        """Load recorded audio and generate waveform/spectrogram plot."""
+        # Use the final audio file path
+        audio_file_path = self.current_rec_audio_file
+        if not audio_file_path or not os.path.exists(audio_file_path):
+            logging.error(f"Recorded audio file not found: {audio_file_path}")
+            return
 
         try:
-            loop_count = 0
-            while self.server.getIsStarted():
-                time.sleep(0.1) # Reduce sleep time slightly for more frequent checks
-                loop_count += 1
-                
-                # --- Status Report every ~0.5 seconds ---
-                if loop_count % 5 == 0:
-                    context = self.analysis_engine.get_harmonic_context()
-                    last_played = self.master_scheduler._last_played_context
-                    status_parts = []
+            # Load audio using soundfile
+            audio_data, sr = sf.read(audio_file_path)
+            logging.info(f"Loaded recorded audio ({audio_data.shape}, sr={sr}) from {audio_file_path}")
+
+            # Ensure audio is mono for librosa display functions
+            if audio_data.ndim > 1:
+                audio_data = np.mean(audio_data, axis=1)
+
+            # Define output filename
+            output_image_file = os.path.join(self.current_rec_session_dir, "session_plot.png")
+            print(f"Generating session plot: {output_image_file}")
+
+            # Create plot
+            fig, axes = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
+
+            # Plot Waveform
+            librosa.display.waveshow(audio_data, sr=sr, ax=axes[0])
+            axes[0].set_title("Session Waveform")
+            axes[0].set_ylabel("Amplitude")
+
+            # Plot Mel Spectrogram
+            S = librosa.feature.melspectrogram(y=audio_data, sr=sr, n_mels=n_mels)
+            S_db = librosa.power_to_db(S, ref=np.max)
+            librosa.display.specshow(S_db, sr=sr, x_axis='time', y_axis='mel', ax=axes[1])
+            axes[1].set_title("Session Mel Spectrogram")
+            axes[1].set_ylabel("Frequency (Mel)")
+            axes[1].set_xlabel("Time (s)")
+            
+            # Add colorbar (optional, but good for spectrograms)
+            # fig.colorbar(img, ax=axes[1], format='%+2.0f dB') 
+            # Need to capture the return value of specshow for colorbar: img = librosa.display.specshow(...)
+
+            plt.tight_layout()
+            plt.savefig(output_image_file)
+            plt.close(fig) # Close the figure to free memory
+            print(f"Saved session plot to {output_image_file}")
+
+        except Exception as e:
+            logging.error(f"Error generating session plot: {e}", exc_info=True)
+            print(f"Error generating session plot: {e}")
+
+    def start(self):
+        """Start the audio server, calibrate, and run main loop or visualization."""
+        self.server.start()
+        # Ensure server is fully started before calibration/recording
+        time.sleep(0.1) 
+        self.calibrate()
+
+        if self.record:
+            print(f"Running recording session for {self.record_duration} seconds...")
+            if self.recorder:
+                print(f"Recording audio output to: {self.current_rec_audio_file}")
+                self.recorder.play()
+            try:
+                time.sleep(self.record_duration)
+            except KeyboardInterrupt:
+                print("\nRecording interrupted.")
+            finally:
+                # Stop recorder *before* generating plot
+                if self.recorder and self.recorder.isPlaying():
+                    self.recorder.stop()
+                    print("Recording stopped.")
+                    # Wait briefly for file to be written? Might not be necessary.
+                    time.sleep(0.1)
+                    self._generate_session_plot() # Generate plot after recording
                     
-                    # Detected Context
-                    if context:
-                        if isinstance(context, str): # Should not happen now, but keep for safety
-                            context_str = f"Chord: {context}"
-                        elif isinstance(context, (int, float)):
-                            context_str = f"Note: {int(round(context))}" 
+                print("Recording session complete.")
+                # Server stop is handled in the main finally block   
+        else:
+            print("Figaro started. Press Ctrl+C to stop.")
+            try:
+                loop_count = 0
+                while self.server.getIsStarted():
+                    time.sleep(0.1) # Reduce sleep time slightly for more frequent checks
+                    loop_count += 1
+                    
+                    # --- Status Report every ~0.5 seconds ---
+                    if loop_count % 5 == 0:
+                        context = self.analysis_engine.get_harmonic_context()
+                        last_played = self.master_scheduler._last_played_context
+                        status_parts = []
+                        
+                        # Detected Context
+                        if context:
+                            if isinstance(context, str): # Should not happen now, but keep for safety
+                                context_str = f"Chord: {context}"
+                            elif isinstance(context, (int, float)):
+                                context_str = f"Note: {int(round(context))}" 
+                            else:
+                                context_str = f"Context: {context}"
                         else:
-                            context_str = f"Context: {context}"
-                    else:
-                        context_str = "Harmony: N/A"
-                    status_parts.append(f"Detected: {context_str}")
+                            context_str = "Harmony: N/A"
+                        status_parts.append(f"Detected: {context_str}")
 
-                    # Playing Status
-                    notes_played = self._get_notes_for_context(last_played)
-                    if notes_played:
-                        played_str = f"Playing: {notes_played}"
-                    else:
-                        played_str = "Playing: -" 
-                    status_parts.append(f"{played_str}")
-                    
-                    # --- Use standard print with newline --- 
-                    print(f"Status - { ' | '.join(status_parts) }") 
-                    # -----------------------------------------
+                        # Playing Status
+                        notes_played = self._get_notes_for_context(last_played)
+                        if notes_played:
+                            played_str = f"Playing: {notes_played}"
+                        else:
+                            played_str = "Playing: -" 
+                        status_parts.append(f"{played_str}")
+                        
+                        # --- Use standard print with newline --- 
+                        print(f"Status - { ' | '.join(status_parts) }") 
+                        # -----------------------------------------
 
-        except KeyboardInterrupt:
-            print("\nStopping Figaro...")
-        finally:
-            self.stop()
+            except KeyboardInterrupt:
+                print("\nStopping Figaro...")
+            finally:
+                self.stop()
 
     # Helper for status printing (add to MasterScheduler or Figaro)
     # Let's add it to Figaro class since it uses GenerativeEngine constants
@@ -1146,6 +1256,11 @@ class Figaro:
         if hasattr(self, 'analysis_engine') and self.analysis_engine:
              self.analysis_engine.stop()
         # Stop input processor? Not strictly necessary if server stops.
+        # --- Stop recorder if it exists and is playing --- 
+        if hasattr(self, 'recorder') and self.recorder and self.recorder.isPlaying():
+            logging.info("Stopping recorder during shutdown.")
+            self.recorder.stop()
+        # -----------------------------------------------
         if self.server.getIsBooted():
             self.server.stop()
             # Optional: Add a small delay to ensure server fully stops before script exits
@@ -1160,6 +1275,9 @@ if __name__ == "__main__":
     parser.add_argument('--list-devices', action='store_true', help="List available audio devices and exit.")
     parser.add_argument('--buffer-size', type=int, default=256, help="Audio buffer size (samples).")
     parser.add_argument('--log-level', default='INFO', choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'], help='Set logging level.')
+    parser.add_argument('--record', action='store_true', help="Enable recording mode (saves audio and plot to timestamped directory).")
+    parser.add_argument('--record-duration', type=float, default=10, help="Recording duration in seconds.")
+    parser.add_argument('--record-dir', type=str, default='recordings', help="Base directory for recordings.")
     args = parser.parse_args()
 
     if args.list_devices:
@@ -1187,7 +1305,13 @@ if __name__ == "__main__":
     logging.basicConfig(level=log_level_from_args, format='%(asctime)s - %(levelname)s - %(module)s - %(message)s')
 
     print(f"Starting Figaro... (Input: {args.input_device or 'Default'}, Output: {args.output_device or 'Default'}, Buffer: {args.buffer_size}, LogLevel: {args.log_level})")
-    collaborator = Figaro(input_device=args.input_device, 
-                        output_device=args.output_device, 
-                        buffer_size=args.buffer_size)
+    if args.record:
+        print(f"Recording Mode Enabled: Duration={args.record_duration}s, Base Dir='{args.record_dir}'")
+
+    collaborator = Figaro(input_device=args.input_device,
+                        output_device=args.output_device,
+                        buffer_size=args.buffer_size,
+                        record=args.record,
+                        record_duration=args.record_duration,
+                        record_dir=args.record_dir)
     collaborator.start()
