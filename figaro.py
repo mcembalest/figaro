@@ -53,7 +53,7 @@ class Figaro:
             room_rms = np.sqrt(np.mean(np.array(room_tone_data)**2))
             self.threshold = max(room_rms * 5.0, 0.05) # 5x room tone or minimum 0.05
             print(f"Calibration complete. Ambient level: {room_rms:.5f}, Threshold: {self.threshold:.5f}")
-            self.trigger.setThreshold(self.threshold)
+            self.trigger.setThreshold(float(self.threshold))
             self.calibrated = True
         else:
             print("Calibration failed - no data recorded. Using default threshold.")
