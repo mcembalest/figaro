@@ -2,31 +2,22 @@ import unittest
 from unittest.mock import MagicMock, patch
 import time
 import logging
-import numpy as np
 
-# Assuming figaro.py is in the parent directory or accessible via PYTHONPATH
-from figaro import AnalysisEngine, hz_to_midi, AudioInputProcessor
+from figaro import AnalysisEngine, hz_to_midi, AudioInputProcessor, Thresh
 
-# Suppress logging during most tests - REMOVING THIS TO DEBUG ERRORS
-# logging.disable(logging.CRITICAL)
-
-# Define a mock InputProcessor for testing
 class MockInputProcessor:
-    # This class should only define the mock object structure
-    # Remove test methods from here
     def __init__(self):
         self.onset_detector = MagicMock()
         self.onset_detector.threshold = 0.1 # Default mock threshold
         self.get_pitch = MagicMock(return_value=0.0)
         self.get_amplitude = MagicMock(return_value=0.0)
 
-# Create the actual test class inheriting from unittest.TestCase
 class TestAnalysisEngine(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
         """Configure logging once for this test class."""
-        cls.logger = logging.getLogger('figaro') # Or just logging.getLogger() if using root
+        cls.logger = logging.getLogger('figaro')
         cls.logger.setLevel(logging.WARNING)
         if not cls.logger.hasHandlers():
             handler = logging.StreamHandler()
@@ -34,18 +25,17 @@ class TestAnalysisEngine(unittest.TestCase):
         cls.logger.propagate = False
 
     def setUp(self):
-        """Set up test fixtures."""
-        # Mock the dependencies
+        """Set up test fixtures, including mock objects."""
         self.mock_input_processor = MagicMock(spec=AudioInputProcessor)
-        # Mock the onset_detector within the input_processor mock
-        self.mock_input_processor.onset_detector = MagicMock()
-        self.mock_input_processor.onset_detector.threshold = 0.1 # Example threshold
-        # Add a default sampling rate
-        self.default_fs = 44100 
+        self.mock_input_processor.onset_detector = MagicMock(spec=Thresh)
+        self.mock_input_processor.onset_detector.threshold = 0.1
+        self.mock_input_processor.get_pitch.return_value = 440.0
+        self.mock_input_processor.get_amplitude.return_value = 0.5
 
-        self.analysis_engine = AnalysisEngine(input_processor=self.mock_input_processor, fs=self.default_fs)
+        self.default_fs = 44100
+        self.analysis_engine = AnalysisEngine(input_processor=self.mock_input_processor)
 
-        # Reset context before each test
+        # Reset harmonic context before each test
         self.analysis_engine.harmonic_context = None
 
     def tearDown(self):
