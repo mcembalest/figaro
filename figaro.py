@@ -7,11 +7,10 @@ import datetime       # Added for timestamped filenames
 import matplotlib
 matplotlib.use('Agg') # Use non-interactive backend BEFORE importing pyplot
 import matplotlib.pyplot as plt # Added for plotting
-from collections import deque
 from pyo import (
     Server, Input, Yin, Port, Thresh,
     SuperSaw, RCOsc, Adsr, TrigFunc,
-    Mix, Freeverb, Delay, MoogLP, Clip, LFO, Spectrum,
+    Mix, Freeverb, Delay, MoogLP, Clip, LFO, # Removed Spectrum
     NewTable, TableRec, Pattern, FM, Noise,
     pa_list_devices, Follower2, Scope, # Added Scope for visualization
     Record # Added Record for visualization
@@ -22,29 +21,24 @@ import librosa.display  # Added for displaying spectrogram
 
 # --- Core Parameters ---
 CALIBRATION_DURATION_S = 3
-ONSET_CUTOFF_TIME_S = 5.0       # Max age of onset times for rhythm analysis
+# REMOVED: ONSET_CUTOFF_TIME_S (Related to unused rhythm analysis)
 ONSET_DEBOUNCE_S = 0.05         # Min time between detected onsets
 AMP_SMOOTH_TIME_S = 0.02       # Smoothing time for amplitude follower before threshold
-NOTE_HISTORY_DURATION_S = 10.0  # Max age of notes for key analysis
-BEAT_CHECK_INTERVAL_S = 0.05
+# REMOVED: NOTE_HISTORY_DURATION_S (Related to unused key detection)
+# REMOVED: BEAT_CHECK_INTERVAL_S (Related to unused rhythm/beat tracking)
 CONTEXT_STUCK_TIMEOUT_S = 10.0  # Time after which to reset stuck context
 
 # --- MIDI/Pitch Related ---
 MIDI_REF_FREQ = 440.0
 MIDI_REF_NOTE = 69
-RHYTHM_PITCH_MIDI = 72
+# REMOVED: RHYTHM_PITCH_MIDI (Related to unused rhythm generation)
 DEFAULT_THRESHOLD = 0.05
-MIN_NOTES_FOR_CONTEXT = 5
-NOTE_HISTORY_LENGTH = 100 # Max notes in history for context analysis
-HARMONY_CONFIDENCE_THRESHOLD = 0.3
-MIN_IOI_S = 0.1
-MAX_IOI_S = 2.0
-IOI_HIST_BINS = 50
-MIN_IOIS_FOR_ANALYSIS = 5
-BEAT_SMOOTHING_ALPHA = 0.3
-BEAT_CONFIDENCE_THRESHOLD = 0.4
-SLOW_BPM_THRESHOLD = 80
-MEDIUM_BPM_THRESHOLD = 120
+# REMOVED: MIN_NOTES_FOR_CONTEXT (Related to unused key detection)
+# REMOVED: NOTE_HISTORY_LENGTH (Related to unused key detection)
+# REMOVED: HARMONY_CONFIDENCE_THRESHOLD (Related to unused key detection)
+# REMOVED: MIN_IOI_S, MAX_IOI_S, IOI_HIST_BINS, MIN_IOIS_FOR_ANALYSIS (Related to unused rhythm analysis)
+# REMOVED: BEAT_SMOOTHING_ALPHA, BEAT_CONFIDENCE_THRESHOLD (Related to unused beat tracking)
+# REMOVED: SLOW_BPM_THRESHOLD, MEDIUM_BPM_THRESHOLD (Related to unused beat tracking)
 
 # --- Synth & FX Parameters (Adjustable) ---
 PAD_ADSR = [0.4, 0.4, 0.7, 4.0]       # Attack, Decay, Sustain Level, Release (Longer Release)
@@ -64,13 +58,9 @@ CHECK_INTERVAL_S = 0.075 # How often to check harmonic context (tune this)
 ONSET_SILENCE_THRESHOLD_S = 5.0 # Time without onsets to trigger reset attempt
 
 
-# Krumhansl Profiles (Normalized)
-KRUMHANSL_MAJOR_PROFILE = np.array([
-    6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.63, 2.24, 2.88
-])
-KRUMHANSL_MINOR_PROFILE = np.array([
-    6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17
-])
+# REMOVED: Krumhansl Profiles (unused)
+# KRUMHANSL_MAJOR_PROFILE = np.array([...])
+# KRUMHANSL_MINOR_PROFILE = np.array([...])
 
 # --- Utility Functions ---
 def hz_to_midi(hz):
@@ -99,337 +89,11 @@ def midi_to_hz(midi):
         logging.warning(f"Invalid MIDI note {midi} for Hz conversion: {e}")
         return None
 
-# --- NEW: Chroma Feature Calculation ---
-N_CHROMA_BINS = 12
-N_OCTAVES = 7 # Covering MIDI 24 to 108 approx
-MIDI_START_NOTE = 24 # C1
-FFT_SIZE = 1024 # Needs tuning based on buffer size and desired resolution
-FFT_OVERLAPS = 4 # Standard is 4 overlaps for FFT
-
-# --- Chord Templates (Normalized Chroma Vectors) ---
-# Templates derived from theoretical distributions. Can be refined.
-PITCH_CLASSES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
-CHORD_TEMPLATES = {}
-
-def _create_chord_template(intervals):
-    template = np.zeros(N_CHROMA_BINS)
-    for interval in intervals:
-        template[interval % N_CHROMA_BINS] = 1.0
-    # Simple normalization (sum to 1)
-    norm = np.linalg.norm(template, ord=1)
-    return template / norm if norm > 0 else template
-
-# Major Triads
-for i in range(N_CHROMA_BINS):
-    root_name = PITCH_CLASSES[i]
-    CHORD_TEMPLATES[f'{root_name}_maj'] = np.roll(_create_chord_template([0, 4, 7]), i)
-# Minor Triads
-for i in range(N_CHROMA_BINS):
-    root_name = PITCH_CLASSES[i]
-    CHORD_TEMPLATES[f'{root_name}_min'] = np.roll(_create_chord_template([0, 3, 7]), i)
-# Add more templates as needed (e.g., Dom7, Dim, Aug...)
-# ----------------------------------------------------
-
-def calculate_chroma(spectrum_data, fs, fft_size=FFT_SIZE):
-    """Calculate a 12-element chroma vector from pyo Spectrum data."""
-    # --- Add logging for spectrum_data structure ---
-    spec_type = type(spectrum_data)
-    spec_len = -1
-    first_elem_type = None
-    spec_stats = "N/A"
-    if isinstance(spectrum_data, (list, np.ndarray)):
-        spec_len = len(spectrum_data)
-        if spec_len > 0:
-            first_elem_type = type(spectrum_data[0])
-            # --- ENHANCED DEBUG LOG ---
-            try:
-                spec_np = np.asarray(spectrum_data)
-                if spec_np.size > 0: # Check for empty array after conversion
-                    spec_stats = f"min={np.min(spec_np):.4f}, max={np.max(spec_np):.4f}, mean={np.mean(spec_np):.4f}"
-                else:
-                    spec_stats = "empty_array_after_conversion"
-            except Exception as e:
-                 spec_stats = f"error_calculating_stats: {e}"
-            # --- END ENHANCED DEBUG LOG ---
-
-    # --- Use INFO level temporarily to ensure visibility ---
-    logging.info(f"calculate_chroma INPUT: Type={spec_type}, Len={spec_len}, FirstElemType={first_elem_type}, Stats=[{spec_stats}]")
-    # -------------------------------------------------------
-
-    if spectrum_data is None or spec_len <= 0: # Use checked spec_len, ensure > 0
-        logging.warning(f"calculate_chroma: Returning zeros due to invalid or empty input (len={spec_len}).") # Add warning
-        return np.zeros(N_CHROMA_BINS)
-
-    # Frequency resolution of the FFT bins
-    freq_resolution = fs / fft_size
-    # Frequencies corresponding to each FFT bin index
-    # Ensure spectrum_data is treated as the array length source
-    fft_freqs = np.arange(spec_len) * freq_resolution 
-
-    chroma_vector = np.zeros(N_CHROMA_BINS)
-    total_energy = 0.0
-
-    # Calculate frequencies for MIDI notes C1 to B7 (approx)
-    midi_note_freqs = [midi_to_hz(MIDI_START_NOTE + i) for i in range(N_OCTAVES * 12)]
-
-    # --- Simplified Mapping: Assign energy of nearest FFT bin to pitch class ---
-    # More sophisticated methods exist (e.g., triangular weighting), but start simple.
-    for i in range(N_OCTAVES * 12):
-        target_freq = midi_note_freqs[i]
-        if target_freq is None:
-            continue
-        
-        # Find the FFT bin closest to the target frequency
-        closest_bin_index = int(round(target_freq / freq_resolution))
-        
-        # Ensure index is within bounds of the spectrum data
-        if 0 <= closest_bin_index < spec_len: # Use checked spec_len
-            raw_energy_value = spectrum_data[closest_bin_index]
-            # --- Add logging for raw_energy_value ---
-            logging.debug(f"calculate_chroma: bin={closest_bin_index}, raw_energy_value Type={type(raw_energy_value)}, Value={raw_energy_value}")
-            # -----------------------------------------
-
-            # --- Attempt to extract scalar energy ---
-            # Assuming it might be a single-element list/array/tuple, try accessing the first element
-            if isinstance(raw_energy_value, (list, np.ndarray, tuple)) and len(raw_energy_value) > 0:
-                energy = raw_energy_value[0] # Assume magnitude is the first element
-            elif isinstance(raw_energy_value, (int, float)): # Or maybe it's already scalar sometimes?
-                energy = raw_energy_value
-            else:
-                energy = 0 # Cannot determine energy, skip this bin
-                logging.warning(f"calculate_chroma: Could not extract scalar energy from bin {closest_bin_index}. Type: {type(raw_energy_value)}")
-            # ----------------------------------------
-            
-            # Now check the extracted scalar energy
-            if np.isfinite(energy) and energy > 0:
-                 # Map MIDI note index (0-83) to pitch class (0-11)
-                 pitch_class = (MIDI_START_NOTE + i) % N_CHROMA_BINS
-                 chroma_vector[pitch_class] += energy
-                 total_energy += energy
-
-    # Normalize the chroma vector
-    if total_energy > 1e-6: # Avoid division by zero or near-zero
-        chroma_vector /= total_energy
-    
-    return chroma_vector
-# -------------------------------------
-
-# --- NEW: Spectral Flatness Calculation ---
-def calculate_spectral_flatness(spectrum_data):
-    """Calculate Spectral Flatness Measure (SFM). Closer to 1 = more noise-like."""
-    # --- Add type check for robustness ---
-    if not isinstance(spectrum_data, (list, np.ndarray)) or len(spectrum_data) == 0:
-        logging.debug("SFM Debug: Input invalid or empty, returning 1.0")
-        # Return 1.0 (max flatness) if input is invalid, empty, or not sequence-like
-        return 1.0
-    # ------------------------------------
-    
-    # Use magnitude spectrum (Spectrum object provides magnitudes)
-    # --- Explicitly cast to float64 to handle integer input from Spectrum callback ---
-    magnitudes = np.asarray(spectrum_data, dtype=np.float64)
-    # ---------------------------------------------------------------------------
-    # Add small epsilon to avoid log(0) or division by zero
-    epsilon = 1e-10
-    magnitudes += epsilon
-    
-    num_bins = len(magnitudes)
-    # --- SFM Debug ---
-    magnitudes_min = np.min(magnitudes)
-    magnitudes_max = np.max(magnitudes)
-    magnitudes_mean = np.mean(magnitudes)
-    logging.debug(f"SFM Debug: Input Array (len={num_bins}, min={magnitudes_min:.4e}, max={magnitudes_max:.4e}, mean={magnitudes_mean:.4e}) after adding epsilon={epsilon:.1e}")
-    # -----------------
-    # This check is now technically redundant due to the initial check, but safe to keep
-    if num_bins == 0:
-         logging.debug("SFM Debug: num_bins is 0, returning 1.0")
-         return 1.0
-         
-    # Geometric mean
-    # Filter out non-positive values before log to avoid warnings/errors
-    # Note: Since we added epsilon > 0, all values should technically be positive now.
-    # Let's check anyway for safety.
-    positive_magnitudes = magnitudes[magnitudes > 0]
-    num_positive = len(positive_magnitudes)
-    # --- SFM Debug ---
-    logging.debug(f"SFM Debug: Found {num_positive} positive magnitudes (out of {num_bins})")
-    # -----------------
-
-    if num_positive == 0:
-        logging.debug("SFM Debug: No positive magnitudes found, returning 1.0")
-        return 1.0 # If no positive magnitudes, treat as maximally flat
-        
-    log_sum = np.sum(np.log(positive_magnitudes))
-    # Use num_positive for the geometric mean calculation if filtering occurred
-    geometric_mean = np.exp(log_sum / num_positive) 
-    
-    # Arithmetic mean (use original magnitudes including epsilon)
-    # Re-calculate arithmetic_mean based on the potentially filtered positive_magnitudes for consistency?
-    # No, SFM definition typically uses the mean of *all* bins. Let's stick to that.
-    arithmetic_mean = np.mean(magnitudes)
-    
-    # --- SFM Debug ---
-    logging.debug(f"SFM Debug: GeoMean={geometric_mean:.4e}, ArithMean={arithmetic_mean:.4e}")
-    # -----------------
-
-    if arithmetic_mean < epsilon: # Check against epsilon, not just zero
-         logging.debug(f"SFM Debug: Arithmetic mean ({arithmetic_mean:.4e}) < epsilon ({epsilon:.1e}), returning 1.0")
-         return 1.0 # Avoid division by zero if signal is essentially zero
-         
-    sfm = geometric_mean / arithmetic_mean
-    # --- SFM Debug ---
-    logging.debug(f"SFM Debug: Calculated SFM = {sfm:.4f} (before clipping)")
-    # -----------------
-    # Clamp SFM to [0, 1] range for safety
-    clipped_sfm = np.clip(sfm, 0.0, 1.0)
-    if clipped_sfm != sfm:
-        logging.debug(f"SFM Debug: SFM clipped to {clipped_sfm:.4f}")
-        
-    return clipped_sfm
-# -----------------------------------------
-
-# --- Key Detection ---
-class KrumhanslKeyDetector:
-    """Detects musical key via Krumhansl-Schmuckler algorithm."""
-    def __init__(self):
-        self.major_profiles = {i: np.roll(KRUMHANSL_MAJOR_PROFILE, i) for i in range(12)}
-        self.minor_profiles = {i: np.roll(KRUMHANSL_MINOR_PROFILE, i) for i in range(12)}
-        self.total_analyses = 0
-        self.total_analysis_time = 0
-        self.max_history = 500
-        self.confidence_history = deque(maxlen=self.max_history)
-        self.logger = logging.getLogger('figaro')
-
-    def _validate_notes(self, notes):
-        """Validate notes list. Filters invalid notes and returns only valid ones."""
-        if not isinstance(notes, list):
-            raise ValueError("Input 'notes' must be a list.")
-        if not notes: return []
-        
-        valid_notes = []
-        for note in notes:
-            try:
-                # Handle numpy types
-                if hasattr(note, 'item'):  # numpy scalar
-                    note = note.item()
-                
-                # Convert to float first for validation
-                try:
-                    note_val = float(note)
-                except (ValueError, TypeError):
-                    continue
-                
-                # Check if it's an integer value
-                if not note_val.is_integer():
-                    continue
-                
-                # Convert to int and validate range
-                note_int = int(note_val)
-                if 0 <= note_int <= 127:
-                    valid_notes.append(note_int)
-                    
-            except Exception:
-                continue
-                
-        return valid_notes
-
-    def analyze(self, notes):
-        """Analyzes MIDI notes list for key. Returns {key, mode, confidence} or None."""
-        valid_notes = self._validate_notes(notes)
-        if not valid_notes or len(valid_notes) < MIN_NOTES_FOR_CONTEXT:
-             return None 
-
-        start_time = time.time()
-        try:
-            pitch_classes = np.array(valid_notes) % 12
-            histogram = np.bincount(pitch_classes, minlength=12).astype(float)
-            
-            hist_sum = np.sum(histogram)
-            if hist_sum == 0:
-                return None 
-            histogram /= hist_sum
-
-            correlations = []
-            for key in range(12):
-                major_corr = self._calculate_correlation(histogram, self.major_profiles[key])
-                minor_corr = self._calculate_correlation(histogram, self.minor_profiles[key])
-                correlations.extend([(key, 'major', major_corr), (key, 'minor', minor_corr)])
-
-            correlations.sort(key=lambda x: x[2], reverse=True)
-            best_key, best_mode, max_correlation = correlations[0]
-            
-            confidence = self._calculate_confidence(histogram, max_correlation, correlations)
-            self._update_profiling(time.time() - start_time, confidence)
-            
-            # key_names = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
-            # logging.debug(...) 
-            
-            return {'key': best_key, 'mode': best_mode, 'confidence': confidence}
-            
-        except Exception as e:
-            logging.error(f"KrumhanslKeyDetector: Unexpected error in analysis: {e}", exc_info=True)
-            return None
-
-    def _calculate_correlation(self, hist1, hist2):
-        """Calculate Pearson correlation (0-1 range). Handles NaNs/Infs/const."""
-        with np.errstate(divide='ignore', invalid='ignore'):
-            correlation = np.corrcoef(hist1, hist2)[0, 1]
-            
-        if not np.isfinite(correlation):
-            return 0.0
-        else:
-            return (correlation + 1) / 2 # Normalize -1..1 to 0..1
-
-    def _calculate_confidence(self, histogram, max_correlation, correlations):
-        """Calculate confidence score based on correlation and heuristics."""
-        confidence = float(max_correlation)
-        unique_pitch_classes = np.count_nonzero(histogram)
-        
-        # --- Debug Logging ---
-        debug_log = [f"Initial conf (max_corr): {confidence:.4f}"]
-        debug_log.append(f"Unique PCs: {unique_pitch_classes}")
-        # --------------------
-        
-        # Penalties
-        if unique_pitch_classes >= 11: # Penalize heavily if input is almost fully chromatic
-            penalty = 0.2
-            confidence *= penalty
-            debug_log.append(f"Applied Chromatic Penalty: {penalty:.2f}")
-        
-        if len(correlations) > 1:
-            gap = max_correlation - correlations[1][2]
-            debug_log.append(f"Correlation Gap: {gap:.4f}")
-            # Penalize if top two candidates are close (ambiguity)
-            if gap < 0.05: 
-                penalty = 0.75
-                confidence *= penalty
-                debug_log.append(f"Applied High Ambiguity Penalty: {penalty:.2f}")
-            elif gap < 0.1: 
-                penalty = 0.85
-                confidence *= penalty
-                debug_log.append(f"Applied Moderate Ambiguity Penalty: {penalty:.2f}")
-        
-        final_confidence = np.clip(confidence, 0.0, 1.0)
-        debug_log.append(f"Final Confidence: {final_confidence:.4f}")
-        
-        # Log if confidence seems low or penalties were applied
-        if final_confidence < 0.7 or len(debug_log) > 3:
-             logging.debug(f"Confidence Calc: {' - '.join(debug_log)}")
-                
-        return final_confidence
-
-    def _update_profiling(self, analysis_time, confidence):
-        """Update internal performance and confidence metrics."""
-        self.total_analyses += 1
-        self.total_analysis_time += analysis_time
-        self.confidence_history.append(confidence)
-        if analysis_time > 0.01: logging.warning(f"Slow key analysis: {analysis_time*1000:.2f}ms")
-
-    def get_profiling_stats(self):
-        """Return dict of analysis performance statistics."""
-        if not self.total_analyses: return None
-        avg_time = self.total_analysis_time / self.total_analyses
-        avg_conf = np.mean(list(self.confidence_history)) # deque -> list
-        return {'avg_analysis_time_ms': avg_time * 1000, 'avg_confidence': avg_conf}
+# --- REMOVED: Chroma Feature Calculation ---
+# --- REMOVED: Chord Templates ---
+# --- REMOVED: calculate_chroma function ---
+# --- REMOVED: calculate_spectral_flatness function ---
+# --- REMOVED: KrumhanslKeyDetector class ---
 
 # --- Audio Input ---
 class AudioInputProcessor:
@@ -444,44 +108,13 @@ class AudioInputProcessor:
         self.onset_callback = onset_callback
         self.onset_func = TrigFunc(self.onset_detector, self._trigger_main_callback)
 
-        # --- Add Spectrum Analyzer --- 
-        # Variable to store the latest spectrum data
-        self._latest_spectrum_data = [] 
-        # Callback function to receive spectrum data
-        def _spectrum_callback(data):
-            # Spectrum gives list of lists (one per channel), we likely want the first
-            if data and isinstance(data, list) and len(data) > 0:
-                # --- MODIFICATION START ---
-                # Expect data[0] to be a list of (freq, mag) tuples
-                # Extract only the magnitude (second element) from each tuple
-                try:
-                    # List comprehension to get magnitudes, ensuring elements are tuples and have 2 items
-                    magnitudes = [item[1] for item in data[0] if isinstance(item, tuple) and len(item) == 2]
-                    self._latest_spectrum_data = magnitudes 
-                    
-                    # --- Updated DEBUG LOG using the processed magnitudes ---
-                    if self._latest_spectrum_data:
-                        latest_np = np.asarray(self._latest_spectrum_data) # Now this should be a simple float array
-                        logging.debug(f"_spectrum_callback: Processed Magnitudes (len={latest_np.size}, type={latest_np.dtype}), Stored (min={np.min(latest_np):.4f}, max={np.max(latest_np):.4f})")
-                    else:
-                        logging.debug("_spectrum_callback: Received data[0], but it contained no valid (freq, mag) tuples.")
-                except (TypeError, IndexError) as e:
-                     logging.error(f"_spectrum_callback: Error processing spectrum data tuples: {e}. Raw data[0] type: {type(data[0])}, First elem type: {type(data[0][0]) if data[0] else 'N/A'}", exc_info=True)
-                     self._latest_spectrum_data = [] # Clear on error
-                # --- MODIFICATION END ---
-            else:
-                # --- NEW DEBUG LOG ---
-                logging.debug(f"_spectrum_callback: Received invalid/empty data structure. Type={type(data)}, Data={data}")
-                # --- END NEW DEBUG LOG ---
-                self._latest_spectrum_data = [] # Clear if data structure is invalid
-
-        # Ensure FFT size matches buffer size capabilities
-        # Note: pyo's Spectrum might internally adjust size based on buffer.
-        # Use overlaps=4 for standard STFT processing.
-        self.spectrum = Spectrum(self.input, size=FFT_SIZE, function=_spectrum_callback)
+        # --- REMOVED: Spectrum Analyzer ---
+        # self._latest_spectrum_data = []
+        # def _spectrum_callback(data): ...
+        # self.spectrum = Spectrum(...)
         # ---------------------------
 
-        logging.info(f"AudioInputProcessor initialized (buf={buffer_size}, thresh={threshold:.3f}, FFT={FFT_SIZE}).")
+        logging.info(f"AudioInputProcessor initialized (buf={buffer_size}, thresh={threshold:.3f}).") # Removed FFT size
 
     def _trigger_main_callback(self):
         trigger_time = time.time()
@@ -497,10 +130,8 @@ class AudioInputProcessor:
     def get_amplitude(self):
         return self.smoothed_amp.get()
 
-    def get_spectrum(self):
-        """Returns the latest magnitude spectrum data received via callback."""
-        # Return the data stored by the callback
-        return self._latest_spectrum_data
+    # --- REMOVED: get_spectrum method ---
+    # def get_spectrum(self): ...
 
 # --- Synthesis ---
 class SoundEngine: # Renamed from SynthManager
@@ -588,7 +219,9 @@ class SoundEngine: # Renamed from SynthManager
              return multiplied_source # No FX, return original (no denorm needed)
 
     def play_harmony(self, voice_name, midi_notes):
-        """Play MIDI notes as frequencies on the specified polyphonic voice type."""
+        """Play MIDI notes as frequencies on the specified polyphonic voice type.
+        Modified to always use voice 0 for monophonic-style retriggering.
+        """
         target_voices = self.voices.get(voice_name, [])
         num_voices = len(target_voices)
         if not num_voices or not midi_notes: return # Added check for midi_notes
@@ -605,7 +238,10 @@ class SoundEngine: # Renamed from SynthManager
             return
 
         for i, freq in enumerate(freqs):
-            voice_index = i % num_voices # Cycle through voices
+            # --- CHANGE: Always use voice 0 to ensure retriggering cuts off previous note --- 
+            # voice_index = i % num_voices # Original: Cycle through voices
+            voice_index = 0 # New: Force monophonic behavior for harmony context
+            # ----------------------------------------------------------------------------
             voice = target_voices[voice_index]
             # --- Correctly set frequency based on oscillator type ---
             osc = voice['osc']
@@ -660,10 +296,10 @@ class AnalysisEngine:
     # --- REMOVED: Yin stability tracking (handling directly in process_onset) ---
     # --- REMOVED: SFM constants ---
 
-    def __init__(self, input_processor, fs):
+    # --- REMOVED: fs parameter from __init__ ---
+    def __init__(self, input_processor):
         """Requires the InputProcessor instance."""
         self.input_processor = input_processor
-        # --- REMOVED: fs dependency (not needed without spectral) ---
         self.harmonic_context = None
         # --- REMOVED: newly_confirmed_context flag ---
         # --- REMOVED: Yin stability tracking variables ---
@@ -749,66 +385,24 @@ class AnalysisEngine:
 class GenerativeEngine:
     """Decides what musical events to generate based on context and rules."""
     TARGET_OCTAVE = 4 # MIDI notes around 60
-    
+    # REMOVED: PITCH_CLASSES from global scope, define locally if needed for status/debug only
+    _PITCH_CLASSES_FOR_DEBUG = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
+
     def __init__(self):
-        self.chord_notes_cache = {} # Simple cache for chord MIDI notes
+        # REMOVED: self.chord_notes_cache
         logging.info("GenerativeEngine initialized.")
 
-    def _get_chord_midi_notes(self, chord_name):
-        """Parses chord name (e.g., 'G#_min') and returns MIDI notes for a default octave.
-        Strictly expects 'Root_maj' or 'Root_min' format.
-        """
-        if not chord_name or '_' not in chord_name:
-            logging.warning(f"GenerativeEngine: Invalid chord format '{chord_name}'. Missing underscore.")
-            return None
-            
-        if chord_name in self.chord_notes_cache:
-            return self.chord_notes_cache[chord_name]
-
-        try:
-            root_str, quality = chord_name.split('_', 1) # Split only once
-
-            # Validate Root
-            if root_str not in PITCH_CLASSES:
-                logging.warning(f"GenerativeEngine: Invalid root note '{root_str}' in chord '{chord_name}'.")
-                return None
-
-            # Validate Quality (Strictly 'maj' or 'min')
-            if quality not in ['maj', 'min']:
-                 logging.warning(f"GenerativeEngine: Invalid or unknown quality '{quality}' in chord '{chord_name}'. Must be 'maj' or 'min'.")
-                 return None
-
-            root_pc = PITCH_CLASSES.index(root_str)
-            # Calculate root MIDI note in the target octave
-            root_midi = self.TARGET_OCTAVE * 12 + root_pc
-
-            if quality == 'maj':
-                intervals = [0, 4, 7]
-            # elif quality == 'min': # This is the only other possibility now
-            else: 
-                intervals = [0, 3, 7]
-            # --- Removed default to major logic ---
-            # else:
-            #     logging.warning(f"GenerativeEngine: Unknown chord quality '{quality}'. Defaulting to major.")
-            #     intervals = [0, 4, 7] # Default to major if quality is unknown
-            # ---------------------------------------
-                
-            chord_midi_notes = [root_midi + interval for interval in intervals]
-            self.chord_notes_cache[chord_name] = chord_midi_notes
-            return chord_midi_notes
-        except (ValueError, IndexError) as e: # ValueError could happen if split fails unexpectedly, although unlikely now
-             logging.error(f"GenerativeEngine: Error parsing chord name '{chord_name}': {e}")
-             return None
+    # --- REMOVED: _get_chord_midi_notes method ---
 
     def generate_response(self, beat_phase, harmonic_context, bpm):
-        """Generate musical events based on context (MIDI note or chord).
-        MODIFIED: Removed dependency on beat_phase. Triggers immediately on context.
+        """Generate musical events based on context (MIDI note).
+        Now generates 'play_harmony' events for 'pad' synth, aligning with test expectations.
+        Simplified to handle only integer MIDI note contexts.
         """
         events = []
         # --- Requires harmonic context --- REMOVED beat_phase check ---
         if harmonic_context is None:
-            # logging.debug("GenEngine: Missing harmonic context, no events.") # Optional debug
-            return events # Need context to generate
+            return events
         # BPM is optional for current rules, but might be needed later.
         # PHASE_TOLERANCE = 0.1 # No longer needed
         # num_beats = 4 # No longer needed
@@ -816,49 +410,29 @@ class GenerativeEngine:
 
         # --- Handle Single Note Context ---
         if isinstance(harmonic_context, (int, float)): # Check if it's a MIDI note number
-            midi_note = harmonic_context
-            note_freq = midi_to_hz(midi_note)
-            if note_freq is None:
-                 return events
+            midi_note = int(round(harmonic_context))
 
-            # Simple Rule: Play the note back on pluck immediately
-            events.append({'synth': 'pluck', 'freq': note_freq, 'action': 'trigger'})
-            logging.debug(f"GenEngine (Mono): Triggering pluck {note_freq:.2f}Hz (Context: {midi_note})")
+            # --- Special Rule for A4 (MIDI 69) from tests ---
+            if midi_note == 69:
+                notes_to_play = [69, 76] # Play A4 and E5
+            else:
+                # Simple Rule: Play the detected note itself
+                notes_to_play = [midi_note]
 
-        # --- Handle Chord Context ---
-        elif isinstance(harmonic_context, str): # Check if it's a chord name string
-            chord_name = harmonic_context
-            chord_midi_notes = self._get_chord_midi_notes(chord_name)
-            if chord_midi_notes is None or len(chord_midi_notes) == 0: # Check length > 0
-                return events
+            # Generate a play_harmony event for the pad synth
+            events.append({
+                'synth': 'pad',
+                'action': 'play_harmony',
+                'midi_notes': notes_to_play
+            })
+            logging.debug(f"GenEngine (Mono): Generated play_harmony for pad, notes={notes_to_play} (Context: {midi_note})")
 
-            root_note = chord_midi_notes[0]
-            root_freq = midi_to_hz(root_note)
+        # --- REMOVED: Chord Context Handling (elif isinstance(harmonic_context, str)) ---
 
-            # Simple Rule: Play the root note on pluck immediately
-            if root_freq:
-                events.append({'synth': 'pluck', 'freq': root_freq, 'action': 'trigger'})
-                logging.debug(f"GenEngine (Chord): Triggering pluck root {root_freq:.2f}Hz (Context: {chord_name})")
-
-            # --- REMOVED OLD BEAT-PHASE BASED LOGIC ---
-            # Previous Chord Logic (Bass on 1, Pluck on 2, 3, 4)
-            # if (beat_phase < PHASE_TOLERANCE or beat_phase > num_beats - PHASE_TOLERANCE):
-            #     if root_freq:
-            #         events.append({'synth': 'bass', 'freq': root_freq, 'action': 'trigger'})
-            #         logging.debug(f"GenEngine (Chord): Triggering bass root {root_freq:.2f}Hz on beat 1")
-            # elif abs(beat_phase - 1.0) < PHASE_TOLERANCE:
-            #      if third_freq:
-            #          events.append({'synth': 'pluck', 'freq': third_freq, 'action': 'trigger'})
-            #          logging.debug(f"GenEngine (Chord): Triggering pluck third {third_freq:.2f}Hz on beat 2")
-            # elif abs(beat_phase - 2.0) < PHASE_TOLERANCE:
-            #      if fifth_freq:
-            #          events.append({'synth': 'pluck', 'freq': fifth_freq, 'action': 'trigger'})
-            #          logging.debug(f"GenEngine (Chord): Triggering pluck fifth {fifth_freq:.2f}Hz on beat 3")
-            # elif abs(beat_phase - 3.0) < PHASE_TOLERANCE:
-            #      if root_freq:
-            #          events.append({'synth': 'pluck', 'freq': root_freq, 'action': 'trigger'})
-            #          logging.debug(f"GenEngine (Chord): Triggering pluck root {root_freq:.2f}Hz on beat 4")
-        # -----------------------------
+        # --- Handle Unknown Context Type (still relevant if context somehow becomes non-numeric) ---
+        elif not isinstance(harmonic_context, (int, float)): # Check if NOT a number
+            logging.warning(f"GenerativeEngine: Received non-numeric context type: {type(harmonic_context)}. No events generated.")
+        # ---------------------------------
 
         return events
 
@@ -868,13 +442,13 @@ class MasterScheduler:
     Checks the harmonic context periodically and triggers sustained sounds 
     based on stable analysis results.
     """
-    
+
     def __init__(self, figaro_instance, analysis_engine, sound_engine, generative_engine):
         # Store the main Figaro instance to access shared state/objects
-        self.figaro = figaro_instance 
+        self.figaro = figaro_instance
         self.analysis_engine = analysis_engine
         self.sound_engine = sound_engine
-        self.generative_engine = generative_engine 
+        self.generative_engine = generative_engine
         self._last_played_context = None # Track the last context we triggered sound for
         self._last_context_change_time = time.time() # Timestamp of last context change
 
@@ -884,9 +458,7 @@ class MasterScheduler:
 
     def _check_context_and_trigger(self):
         """Periodically checks harmonic context and triggers sounds if it changes."""
-        # --- Log current smoothed amplitude --- 
-        current_smoothed_amp_val = None
-        current_smoothed_amp_type = None
+        # --- Log current smoothed amplitude ---
         try:
             current_smoothed_amp = self.figaro.input_processor.smoothed_amp
             # Check if the object itself is valid before calling get()
@@ -895,85 +467,84 @@ class MasterScheduler:
                 current_smoothed_amp_type = type(current_smoothed_amp_val)
             else:
                 logging.warning("Scheduler tick: smoothed_amp object is None")
-                
+                current_smoothed_amp_val = 0.0 # Default if unavailable
+                current_smoothed_amp_type = None
+
             logging.debug(f"Scheduler tick: Smoothed Amp Raw Value = {current_smoothed_amp_val}, Type = {current_smoothed_amp_type}")
             # Only log formatted value if it seems valid (e.g., a number)
             if isinstance(current_smoothed_amp_val, (int, float)):
                  logging.debug(f"Scheduler tick: Smoothed Amp Formatted = {current_smoothed_amp_val:.5f}")
-            
+
         except Exception as e:
              logging.error(f"Scheduler tick: Error getting/logging smoothed_amp: {e}", exc_info=True)
         # --------------------------------------
-        
+
         current_context = self.analysis_engine.get_harmonic_context()
-        notes_to_play = None
+             # --- Debug: Log amplitude and threshold before silence check ---
+        try:
+            # Safely get amp and threshold
+            current_amp_val = self.figaro.input_processor.smoothed_amp.get() if self.figaro.input_processor.smoothed_amp else 0.0
+            current_thresh_val = self.figaro.input_processor.onset_detector.threshold if self.figaro.input_processor.onset_detector else DEFAULT_THRESHOLD
+            logging.debug(f"Scheduler Check: Context={current_context}, Amp={current_amp_val:.5f}, Thresh={current_thresh_val:.5f}")
+        except Exception as e:
+            logging.error(f"Scheduler Check: Error getting amp/thresh: {e}")
+        # -------------------------------------------------------------
 
-        # --- Context Change Detection ---
-        if current_context != self._last_played_context:
-            logging.debug(f"Scheduler: Context changed from '{self._last_played_context}' to '{current_context}'")
-            self._last_context_change_time = time.time() # Update timestamp on change
-
-            if current_context is not None:
-                # --- Determine MIDI notes based on context ---
-                if isinstance(current_context, (int, float)): # Stable Single Note
-                    midi_note = int(round(current_context))
-                    if midi_note == 69: # Special case for A4
-                        notes_to_play = [69, 76] # A4 + E5
-                        logging.info(f"Scheduler: Detected A4 ({midi_note}), playing A+E fifth {notes_to_play}")
-                    else:
-                        notes_to_play = [midi_note]
-                        logging.info(f"Scheduler: Detected stable note {midi_note}, playing {notes_to_play}")
-                        
-                elif isinstance(current_context, str): # Stable Chord
-                    notes_to_play = self.generative_engine._get_chord_midi_notes(current_context)
-                    if notes_to_play:
-                         logging.info(f"Scheduler: Detected stable chord '{current_context}', playing {notes_to_play}")
-                    else:
-                         logging.warning(f"Scheduler: Could not get MIDI notes for chord '{current_context}'")
-                else:
-                    logging.warning(f"Scheduler: Unknown context type: {type(current_context)}")
-
-                # --- Trigger Sound ---
-                if notes_to_play:
-                    # Use 'pad' voice for sustained harmony
-                    self.sound_engine.play_harmony('pad', notes_to_play) 
-            # else: context changed to None (silence/uncertainty), sound will decay naturally
-
-            # --- Update last played context ---
+        # --- Check if context has changed and is valid ---
+        if current_context is not None and current_context != self._last_played_context:
+            logging.info(f"Scheduler: New context detected ({current_context}). Generating response.")
             self._last_played_context = current_context
-            
-        # --- Stuck Context Timeout Check ---
-        elif current_context is not None and time.time() - self._last_context_change_time > CONTEXT_STUCK_TIMEOUT_S:
-             logging.warning(f"Scheduler: Context '{current_context}' seems stuck for >{CONTEXT_STUCK_TIMEOUT_S}s. Resetting.")
-             # Forcibly clear the context in AnalysisEngine and the scheduler's state
-             self.analysis_engine.harmonic_context = None # Directly modify if AnalysisEngine allows or add a method
-             self._last_played_context = None
-             self._last_context_change_time = time.time() # Reset timer
-         # -----------------------------------
-             
-        # --- Experimental Onset Detector Reset --- 
+            self._last_context_change_time = time.time() # Still useful to know when changes happen
+
+            # --- Generate and Play Events ---
+            bpm = self.analysis_engine.get_tempo_bpm()
+            beat_phase = self.analysis_engine.get_beat_phase()
+            events = self.generative_engine.generate_response(beat_phase, current_context, bpm)
+
+            if events:
+                logging.debug(f"Scheduler: Generated {len(events)} events: {events}")
+                for event in events:
+                    synth_name = event.get('synth')
+                    action = event.get('action')
+                    freq = event.get('freq')
+                    midi_notes = event.get('midi_notes') # For harmony
+
+                    if action == 'trigger' and synth_name and freq is not None:
+                        logging.info(f"Scheduler: Triggering synth '{synth_name}' freq={freq:.2f}Hz")
+                        self.sound_engine.trigger_voice(synth_name, freq)
+                    elif action == 'play_harmony' and synth_name and midi_notes:
+                         logging.info(f"Scheduler: Playing harmony on '{synth_name}' notes={midi_notes}")
+                         self.sound_engine.play_harmony(synth_name, midi_notes)
+            else:
+                 logging.debug(f"Scheduler: No events generated for context {current_context}")
+            # -------------------------------
+
+        elif current_context is None and self._last_played_context is not None:
+            # Context became None (e.g., silence after note), reset last played context
+            logging.info("Scheduler: Context lost. Resetting last played context.")
+            self._last_played_context = None # Reset last played context
+            self._last_context_change_time = time.time() # Update time since context changed
+            # Optional: Stop sustained voices here if desired
+            # self.sound_engine.stop_voice('pad') # Example
+
+        # --- Experimental Onset Detector Reset (Keep this, it handles lack of *any* onsets) ---
         current_time = time.time()
-        time_since_last_onset = current_time - self.figaro.last_raw_onset_time
-        if time_since_last_onset > ONSET_SILENCE_THRESHOLD_S:
-            logging.warning(f"Scheduler: No onsets detected for {time_since_last_onset:.2f}s. Attempting threshold reset.")
-            try:
-                original_threshold = self.figaro.input_processor.onset_detector.threshold
-                # Briefly lower threshold (e.g., to half, but not below a minimum like 0.005)
-                # --- Make dip slightly more aggressive --- 
-                temp_threshold = max(original_threshold * 0.3, 0.003) # Lower multiplier and minimum
-                # ------------------------------------------
-                self.figaro.input_processor.set_threshold(temp_threshold) 
-                # Maybe a tiny delay is needed? Pyo timing can be tricky.
-                # time.sleep(0.01) # Let's try without sleep first
-                self.figaro.input_processor.set_threshold(original_threshold) # Restore original
-                # Reset the timer so we don't keep trying immediately
-                self.figaro.last_raw_onset_time = current_time 
-                logging.info("Scheduler: Onset detector threshold reset attempted.")
-            except Exception as e:
-                logging.error(f"Scheduler: Error during threshold reset: {e}")
+        if hasattr(self.figaro, 'last_raw_onset_time') and self.figaro.last_raw_onset_time > 0:
+            time_since_last_onset = current_time - self.figaro.last_raw_onset_time
+            if time_since_last_onset > ONSET_SILENCE_THRESHOLD_S:
+                logging.warning(f"Scheduler: No onsets detected for {time_since_last_onset:.2f}s. Attempting threshold reset.")
+                try:
+                    original_threshold = self.figaro.input_processor.onset_detector.threshold
+                    temp_threshold = max(original_threshold * 0.3, 0.003)
+                    self.figaro.input_processor.set_threshold(temp_threshold)
+                    self.figaro.input_processor.set_threshold(original_threshold)
+                    self.figaro.last_raw_onset_time = current_time
+                    logging.info("Scheduler: Onset detector threshold reset attempted.")
+                except Exception as e:
+                    logging.error(f"Scheduler: Error during threshold reset: {e}")
+        else:
+             self.figaro.last_raw_onset_time = current_time
         # -----------------------------------------
-        
-        # else: context hasn't changed and timeout not reached, let the current sound sustain/decay
 
     def stop(self):
         """Stop the scheduler's checking Pattern."""
@@ -999,25 +570,27 @@ class Figaro:
             if output_device is not None:
                  try: self.server.setOutputDevice(output_device)
                  except Exception as e: logging.error(f"Failed to set output device {output_device}: {e}")
-                 
+
             self.server.setMidiInputDevice(99) # Avoid MIDI conflicts
             self.server.boot()
-        
-        # --- Get server sampling rate --- 
+
+        # --- Get server sampling rate ---
         self.fs = self.server.getSamplingRate()
         logging.info(f"Server sampling rate: {self.fs} Hz")
         # --------------------------------
-        
+
         self.calibrated_threshold = DEFAULT_THRESHOLD
         self.calibration_duration = calibration_duration
-        self.input_processor = AudioInputProcessor(onset_callback=self.on_onset_detected, 
+        self.input_processor = AudioInputProcessor(onset_callback=self.on_onset_detected,
                                                    threshold=self.calibrated_threshold,
                                                    buffer_size=buffer_size)
         self.sound_engine = SoundEngine()
-        self.analysis_engine = AnalysisEngine(input_processor=self.input_processor, fs=self.fs)
+        # --- Pass only input_processor to AnalysisEngine ---
+        self.analysis_engine = AnalysisEngine(input_processor=self.input_processor)
+        # ---------------------------------------------------
         self.generative_engine = GenerativeEngine()
         # --- Instantiate MasterScheduler (no changes needed here) --- 
-        self.master_scheduler = MasterScheduler(figaro_instance=self, analysis_engine=self.analysis_engine, 
+        self.master_scheduler = MasterScheduler(figaro_instance=self, analysis_engine=self.analysis_engine,
                                               sound_engine=self.sound_engine,
                                               generative_engine=self.generative_engine)
         # ------------------------------------------------
@@ -1059,11 +632,11 @@ class Figaro:
         # Use the Follower directly for calibration, as it's what Thresh uses
         cal_table = NewTable(length=self.calibration_duration)
         # Ensure recorder uses the exact same source as the onset detector
-        recorder = TableRec(self.input_processor.smoothed_amp, table=cal_table).play() 
+        recorder = TableRec(self.input_processor.smoothed_amp, table=cal_table).play()
         time.sleep(self.calibration_duration)
         # --- Ensure recorder is stopped before accessing table --- 
-        recorder.stop() 
-        
+        recorder.stop()
+
         samples = np.array(cal_table.getTable())
         if samples.size > 0:
             # Calculate peak or high percentile instead of RMS for thresholding impulses
@@ -1071,16 +644,16 @@ class Figaro:
             noise_floor = np.median(samples) # Estimate general noise level
             # Ensure threshold isn't ridiculously low if peak is very close to noise floor
             # Adjusted multiplier calculation for clarity
-            calculated_thresh = noise_floor + (peak_amp - noise_floor) * 0.5 
+            calculated_thresh = noise_floor + (peak_amp - noise_floor) * 0.5
             self.calibrated_threshold = max(calculated_thresh, 0.015) # Ensure a minimum reasonable threshold
-            
+
             self.input_processor.set_threshold(self.calibrated_threshold)
             print(f"Calibration done. Noise Floor: {noise_floor:.5f}, Peak (98%): {peak_amp:.5f} => Threshold: {self.calibrated_threshold:.5f}")
         else:
             print("Calibration failed (no data). Using default threshold.")
             self.calibrated_threshold = DEFAULT_THRESHOLD # Explicitly set default if fail
             self.input_processor.set_threshold(self.calibrated_threshold)
-        
+
         # --- Explicitly cleanup pyo objects --- 
         cal_table.reset() # Reset table data
         del recorder      # Remove reference to TableRec
@@ -1089,11 +662,14 @@ class Figaro:
 
     def on_onset_detected(self, trigger_time):
         """Callback triggered by AudioInputProcessor. Feeds AnalysisEngine."""
+        # --- Update raw onset time *before* debounce check --- 
+        self.last_raw_onset_time = trigger_time # Store time of raw onset
+        # ----------------------------------------------------
+
         # --- NEW DEBUG LOG --- 
         logging.debug(f"Raw onset callback triggered at {trigger_time:.4f}")
-        self.last_raw_onset_time = trigger_time # Store time of raw onset
         # -------------------
-        
+
         # Debounce
         if trigger_time - self.last_true_onset_time < ONSET_DEBOUNCE_S:
              # logging.debug(f"Debounced onset at {trigger_time:.4f}") # Keep debug if needed
@@ -1141,7 +717,7 @@ class Figaro:
             axes[1].set_title("Session Mel Spectrogram")
             axes[1].set_ylabel("Frequency (Mel)")
             axes[1].set_xlabel("Time (s)")
-            
+
             # Add colorbar (optional, but good for spectrograms)
             # fig.colorbar(img, ax=axes[1], format='%+2.0f dB') 
             # Need to capture the return value of specshow for colorbar: img = librosa.display.specshow(...)
@@ -1159,7 +735,7 @@ class Figaro:
         """Start the audio server, calibrate, and run main loop or visualization."""
         self.server.start()
         # Ensure server is fully started before calibration/recording
-        time.sleep(0.1) 
+        time.sleep(0.1)
         self.calibrate()
 
         if self.record:
@@ -1179,7 +755,7 @@ class Figaro:
                     # Wait briefly for file to be written? Might not be necessary.
                     time.sleep(0.1)
                     self._generate_session_plot() # Generate plot after recording
-                    
+
                 print("Recording session complete.")
                 # Server stop is handled in the main finally block   
         else:
@@ -1189,21 +765,20 @@ class Figaro:
                 while self.server.getIsStarted():
                     time.sleep(0.1) # Reduce sleep time slightly for more frequent checks
                     loop_count += 1
-                    
+
                     # --- Status Report every ~0.5 seconds ---
                     if loop_count % 5 == 0:
                         context = self.analysis_engine.get_harmonic_context()
                         last_played = self.master_scheduler._last_played_context
                         status_parts = []
-                        
+
                         # Detected Context
                         if context:
-                            if isinstance(context, str): # Should not happen now, but keep for safety
-                                context_str = f"Chord: {context}"
-                            elif isinstance(context, (int, float)):
-                                context_str = f"Note: {int(round(context))}" 
+                            # REMOVED: String context check (no longer possible)
+                            if isinstance(context, (int, float)):
+                                context_str = f"Note: {int(round(context))}"
                             else:
-                                context_str = f"Context: {context}"
+                                context_str = f"Context: {context}" # Fallback
                         else:
                             context_str = "Harmony: N/A"
                         status_parts.append(f"Detected: {context_str}")
@@ -1211,17 +786,20 @@ class Figaro:
                         # Playing Status
                         notes_played = self._get_notes_for_context(last_played)
                         if notes_played:
-                            played_str = f"Playing: {notes_played}"
+                            # Convert MIDI numbers to strings for better readability
+                            notes_str = ", ".join(map(str, notes_played))
+                            played_str = f"Playing: {notes_str}"
                         else:
-                            played_str = "Playing: -" 
+                            played_str = "Playing: -"
                         status_parts.append(f"{played_str}")
-                        
-                        # --- Use standard print with newline --- 
-                        print(f"Status - { ' | '.join(status_parts) }") 
+
+                        # --- Use standard print with newline ---
+                        # Use carriage return '\r' to overwrite the previous status line
+                        print(f"Status - { ' | '.join(status_parts) }", end='\\r', flush=True)
                         # -----------------------------------------
 
             except KeyboardInterrupt:
-                print("\nStopping Figaro...")
+                print("\nStopping Figaro...") # Print newline after Ctrl+C
             finally:
                 self.stop()
 
@@ -1234,24 +812,14 @@ class Figaro:
             midi_note = int(round(context))
             if midi_note == 69: return [69, 76]
             else: return [midi_note]
-        elif isinstance(context, str):
-             # Use generative engine's helper, careful about caching/state
-             # It's safer to recalculate here for display purposes
-             try:
-                 root_str, quality = context.split('_')
-                 root_pc = PITCH_CLASSES.index(root_str)
-                 root_midi = GenerativeEngine.TARGET_OCTAVE * 12 + root_pc # Access class variable
-                 if quality == 'maj': intervals = [0, 4, 7]
-                 elif quality == 'min': intervals = [0, 3, 7]
-                 else: intervals = [0, 4, 7] # Default
-                 return [root_midi + i for i in intervals]
-             except:
-                 return [] # Error parsing
-        return []
+        # --- REMOVED: Chord context handling (elif isinstance(context, str)) ---
+        # elif isinstance(context, str): ...
+        # --------------------------------------------------------------------
+        return [] # Fallback for unknown context type
 
     def stop(self):
         """Stop the audio server and analysis/scheduling engines gracefully."""
-        if hasattr(self, 'master_scheduler') and self.master_scheduler: 
+        if hasattr(self, 'master_scheduler') and self.master_scheduler:
             self.master_scheduler.stop()
         if hasattr(self, 'analysis_engine') and self.analysis_engine:
              self.analysis_engine.stop()
@@ -1289,16 +857,16 @@ if __name__ == "__main__":
         for i, device in enumerate(pa_list_devices()[1]):
              # Filter for devices belonging to the PortAudio Host API (index 0 usually)
              # and having output channels. Adjust host api index if needed based on `pa_list_devices()` output.
-             if device['host api index'] == 0 and device['max output chans'] > 0: 
+             if device['host api index'] == 0 and device['max output chans'] > 0:
                   print(f"  ID: {i} - Name: {device['name']}")
                   found_out = True
         if not found_out:
              print("  (No PortAudio output devices found)")
-            
+
         print("\nRun with '-i <ID>' to select an input device.")
         print("Run with '-o <ID>' to select an output device.")
         exit()
-        
+
     # Set logging level from args
     log_level_from_args = getattr(logging, args.log_level.upper(), logging.INFO)
     # Configure logging (can be done once here)
